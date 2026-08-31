@@ -1,0 +1,17 @@
+Add percentage to download indicator
+
+Check shared mods, only redownload if updates are required, all maps with shared dependencies should be marked up to date if a different map was updated and the only difference is a shared mod file
+
+Add prompt for SC2 and Wine discovery on first launch
+
+Add auto discovery and easy dropdown list of Wine versions a-la Lutris and/or Heroic Launcher
+
+Remove success dialog on downloading a campaign
+
+Add support for moving campaigns when wine prefix is changed
+
+Remove redundant Wine Prefix and SC2 Root directories, SC2 Root can always be found with an absolute path from the Wine Prefix, and vice versa
+
+Installer that detects distro and installs dependencies, creates .desktop shortcut and can uninstall.
+
+Write out dependencies for this, python and umu-launcher for sure.
