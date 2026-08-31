@@ -3,27 +3,27 @@
  
 Note that this project does currently work for me, but is absolutely NOT ready for public release yet, as should be clear from the Features listed below.  I will also make an installer once I am happy with the feature set.  If you're vaguely familiar with how python works feel free to install the Dependencies and try it yourself but I am actively polishing this project to hopefully be feature compatible with the original Campaign Launcher project from R-P-S (321 on Discord)
 
-# Upcoming Features
-
-Add percentage to download indicator.
+# Upcoming Features (roughly in order of importance)
 
 Check shared mods, only redownload if updates are required, all maps with shared dependencies should be marked up to date if a different map was updated and the only difference is a shared mod file.
-
-Add a delete mods option in top left as well as solarite icon and links.
 
 Add prompt for SC2 and Wine discovery on first launch.
 
 Add auto discovery and easy dropdown list of Wine versions a-la Lutris and/or Heroic Launcher.
 
+Installer that detects distro and installs dependencies, creates .desktop shortcut and can uninstall.
+
+Add a delete mods option in top left as well as solarite icon and links.
+
+Add support for moving campaigns when wine prefix is changed (or at least remove previous campaigns, launcher will still think campaigns are installed if Wine prefix is changed).
+
+Write out dependencies for this, python, PyQt6, and umu-launcher for sure.
+
+Add percentage to download indicator.
+
 Remove success dialog on downloading a campaign.
 
 Remove launch dialog when launching a campaign.
-
-Add support for moving campaigns when wine prefix is changed.
-
-Installer that detects distro and installs dependencies, creates .desktop shortcut and can uninstall.
-
-Write out dependencies for this, python, PyQt6, and umu-launcher for sure.
 
 # License
 
