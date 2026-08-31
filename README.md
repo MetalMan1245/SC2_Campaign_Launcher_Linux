@@ -5,25 +5,25 @@ Note that this project does currently work for me, but is absolutely NOT ready f
 
 # Upcoming Features
 
-Add percentage to download indicator
+Add percentage to download indicator.
 
-Check shared mods, only redownload if updates are required, all maps with shared dependencies should be marked up to date if a different map was updated and the only difference is a shared mod file
+Check shared mods, only redownload if updates are required, all maps with shared dependencies should be marked up to date if a different map was updated and the only difference is a shared mod file.
 
-Add a delete mods option in top left (present in original project)
+Add a delete mods option in top left as well as solarite icon and links.
 
-Add prompt for SC2 and Wine discovery on first launch
+Add prompt for SC2 and Wine discovery on first launch.
 
-Add auto discovery and easy dropdown list of Wine versions a-la Lutris and/or Heroic Launcher
+Add auto discovery and easy dropdown list of Wine versions a-la Lutris and/or Heroic Launcher.
 
-Remove success dialog on downloading a campaign
+Remove success dialog on downloading a campaign.
 
-Remove launch dialog when launching a campaign
+Remove launch dialog when launching a campaign.
 
-Add support for moving campaigns when wine prefix is changed
+Add support for moving campaigns when wine prefix is changed.
 
 Installer that detects distro and installs dependencies, creates .desktop shortcut and can uninstall.
 
-Write out dependencies for this, python and umu-launcher for sure.
+Write out dependencies for this, python, PyQt6, and umu-launcher for sure.
 
 # License
 
