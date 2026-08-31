@@ -10,7 +10,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QScrollArea, QFrame, QFileDialog,
-    QDialog, QLineEdit, QMessageBox, QGridLayout
+    QDialog, QLineEdit, QMessageBox, QGridLayout, QCheckBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings, QRect
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont
@@ -101,6 +101,93 @@ class AppSettings:
             self.set_installed_campaigns(installed)
             print(f'[SETTINGS] Removed {slug} from installed campaigns')
 
+    def wine_prefix_override(self) -> str | None:
+        """Get manually set wine prefix override (if any)"""
+        val = self.settings.value('wine_prefix_override', type=str)
+        return val if val else None
+
+    def set_wine_prefix_override(self, prefix: str | None):
+        """Set or clear manual wine prefix override"""
+        if prefix:
+            self.settings.setValue('wine_prefix_override', prefix)
+        else:
+            self.settings.remove('wine_prefix_override')
+
+    def use_auto_prefix(self) -> bool:
+        """Check if automatic prefix detection is enabled"""
+        return self.settings.value('use_auto_prefix', True, type=bool) == True
+
+    def set_use_auto_prefix(self, enabled: bool):
+        """Toggle automatic prefix detection"""
+        self.settings.setValue('use_auto_prefix', enabled)
+
+    def wine_prefix(self) -> str:
+        """Derive Wine prefix from SC2 root by stripping everything after drive_c"""
+        if self.use_auto_prefix():
+            root_str = str(self.sc2_root())
+            if 'drive_c' in root_str:
+                # e.g. /home/f/.../drive_c/Program Files (x86)/StarCraft II → /home/f/...
+                drive_c_idx = root_str.index('drive_c')
+                return root_str[:drive_c_idx].rstrip('/')
+            # Fallback: try stored override
+            val = self.wine_prefix_override()
+            return val if val else ''
+        else:
+            # Manual override takes precedence
+            val = self.wine_prefix_override()
+            return val if val else ''
+
+    def get_shared_mod_registry(self) -> dict[str, dict]:
+        """Global registry of downloaded mods: {filename: {'hash': ..., 'version': ..., 'campaigns': [...]}}"""
+        val = self.settings.value('shared_mod_registry', {}, type=dict)
+        return val if val else {}
+
+    def set_shared_mod_registry(self, registry: dict):
+        self.settings.setValue('shared_mod_registry', registry)
+
+    def register_mod_file(self, filename: str, file_hash: str, version: str = '1.0', campaigns: list[str] = None):
+        """Track a mod file in the global registry"""
+        registry = self.get_shared_mod_registry()
+        if filename not in registry:
+            registry[filename] = {'hash': file_hash, 'version': version, 'campaigns': []}
+        else:
+            registry[filename]['hash'] = file_hash
+            registry[filename]['version'] = version
+
+        if campaigns:
+            for slug in campaigns:
+                if slug not in registry[filename]['campaigns']:
+                    registry[filename]['campaigns'].append(slug)
+
+        self.set_shared_mod_registry(registry)
+
+    def unregister_campaign_from_mods(self, slug: str):
+        """Remove a campaign from all mod registry entries"""
+        registry = self.get_shared_mod_registry()
+        for filename in registry:
+            if slug in registry[filename]['campaigns']:
+                registry[filename]['campaigns'].remove(slug)
+
+        # Remove orphaned entries (no campaigns using this mod)
+        registry = {k: v for k, v in registry.items() if v['campaigns']}
+        self.set_shared_mod_registry(registry)
+
+    def is_mod_up_to_date(self, filename: str, remote_hash: str) -> bool:
+        """Check if mod file exists locally and matches remote hash"""
+        registry = self.get_shared_mod_registry()
+        if filename not in registry:
+            return False
+        return registry[filename]['hash'] == remote_hash
+
+    def compute_file_hash(self, filepath: Path) -> str:
+        """Compute SHA256 hash of a file for comparison"""
+        import hashlib
+        sha256 = hashlib.sha256()
+        with open(filepath, 'rb') as f:
+            for chunk in iter(lambda: f.read(8192), b''):
+                sha256.update(chunk)
+        return sha256.hexdigest()
+
 def http_get(url: str) -> bytes:
     """Simple HTTP GET with a proper User-Agent. Raises on error."""
     print(f'[HTTP] GET {url}')
@@ -183,6 +270,23 @@ class MapsJsonFetcher(QThread):
 
             print(f'[PARSE] {slug}: author="{author}", raw_author={raw_author}')
 
+            # Check if map/mod has hash or version field in JSON
+            map_versions = {}
+            for map_item in entry.get('maps', []):
+                if isinstance(map_item, dict):
+                    name = map_item.get('name', '')
+                    hash_val = map_item.get('hash') or map_item.get('checksum')
+                    if name and hash_val:
+                        map_versions[name] = hash_val
+
+            mod_versions = {}
+            for mod_item in entry.get('mods', []):
+                if isinstance(mod_item, dict):
+                    name = mod_item.get('name', '')
+                    hash_val = mod_item.get('hash') or mod_item.get('checksum')
+                    if name and hash_val:
+                        mod_versions[name] = hash_val
+
             campaigns[slug] = {
                 'name': str(name),
                 'slug': slug,
@@ -194,10 +298,22 @@ class MapsJsonFetcher(QThread):
                 'mods': entry.get('mods', []),
                 'raw': entry,
                 'status': 'not_installed',
+                'map_hashes': map_versions,
+                'mod_hashes': mod_versions,
             }
 
             if self._settings.is_campaign_installed(slug):
-                campaigns[slug]['status'] = 'installed'
+                # Campaign is marked as installed, but check if any mods need updating
+                needs_update = False
+                mod_hashes = mod_versions
+
+                for mod_filename, remote_hash in mod_hashes.items():
+                    if not self._settings.is_mod_up_to_date(mod_filename, remote_hash):
+                        needs_update = True
+                        break
+
+                campaigns[slug]['status'] = 'update_available' if needs_update else 'installed'
+                print(f'[PARSE] {slug}: {campaigns[slug]["status"]} (checked {len(mod_hashes)} shared mods)')
 
         return list(campaigns.values())
 
@@ -205,50 +321,44 @@ class CampaignDownloader(QThread):
     progress = pyqtSignal(int, int, str)
     finished_signal = pyqtSignal(bool, str)
 
-    def __init__(self, campaign: dict, sc2_root: Path):
+    def __init__(self, campaign: dict, sc2_root: Path, settings: AppSettings):
         super().__init__()
         self.campaign = campaign
         self.sc2_root = sc2_root
+        self.settings = settings
 
     def run(self):
         try:
             raw = self.campaign.get('raw', {})
             slug = self.campaign['slug']
             files_downloaded = 0
+            files_skipped = 0
             files_failed = 0
 
             print(f'[DOWNLOAD] Processing campaign: {slug}')
-            print(f'[DOWNLOAD] Raw data keys: {list(raw.keys())}')
-
-            # Get maps array from raw JSON
             maps_list = raw.get('maps', [])
             mods_list = raw.get('mods', [])
+            total = len(maps_list) + len(mods_list)
 
             print(f'[DOWNLOAD] Found {len(maps_list)} maps and {len(mods_list)} mods')
 
-            # Process maps
+            # Maps: campaign-specific, always in Maps/<slug>/, always downloaded
             for i, map_item in enumerate(maps_list):
                 if isinstance(map_item, str):
-                    # Old format: just a filename string
                     fname = map_item
                     url = f'https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/{fname}'
                 elif isinstance(map_item, dict):
-                    # New format: object with url field
                     fname = map_item.get('name', 'unknown.map')
-                    url = map_item.get('url')  # <<< USE THE URL FROM JSON
-
+                    url = map_item.get('url')
                     if not url:
                         print(f'[DOWNLOAD] WARNING: No URL for {fname}, skipping')
                         files_failed += 1
                         continue
-
-                    print(f'[DOWNLOAD] Using URL from JSON: {url}')
                 else:
-                    print(f'[DOWNLOAD] Unknown map item type: {type(map_item)}')
                     files_failed += 1
                     continue
 
-                self.progress.emit(i + 1, len(maps_list) + len(mods_list), f'{fname}')
+                self.progress.emit(i + 1, total, fname)
                 dest = self._dest(fname, is_mod=False)
 
                 try:
@@ -259,33 +369,47 @@ class CampaignDownloader(QThread):
                     files_downloaded += 1
                 except Exception as e:
                     print(f'[DOWNLOAD] ✗ Failed {fname}: {e}')
-                    self.progress.emit(i + 1, len(maps_list) + len(mods_list), f'Failed: {fname}')
                     files_failed += 1
 
-            # Process mods
-            total = len(maps_list) + len(mods_list)
+            # Mods: SHARED, always in SC2/Mods/ — skip if already present
             for j, mod_item in enumerate(mods_list):
                 idx = len(maps_list) + j + 1
 
                 if isinstance(mod_item, str):
                     fname = mod_item
                     url = f'https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/{fname}'
+                    remote_hash = None
                 elif isinstance(mod_item, dict):
                     fname = mod_item.get('name', 'unknown.mod')
                     url = mod_item.get('url')
+                    remote_hash = mod_item.get('hash') or mod_item.get('checksum')
 
                     if not url:
                         print(f'[DOWNLOAD] WARNING: No URL for mod {fname}, skipping')
                         files_failed += 1
+                        self.progress.emit(idx, total, f'No URL: {fname}')
                         continue
-
-                    print(f'[DOWNLOAD] Using URL from JSON: {url}')
                 else:
                     files_failed += 1
                     continue
 
-                self.progress.emit(idx, total, f'{fname}')
+                self.progress.emit(idx, total, fname)
                 dest = self._dest(fname, is_mod=True)
+
+                # Dedup: mod file is global, check before downloading
+                if dest.exists():
+                    if remote_hash:
+                        local_hash = self.settings.compute_file_hash(dest)
+                        if local_hash == remote_hash:
+                            print(f'[DOWNLOAD] Mod {fname} up to date (hash match), skipping')
+                            files_skipped += 1
+                            self.progress.emit(idx, total, f'{fname} (up to date)')
+                            continue
+                    else:
+                        print(f'[DOWNLOAD] Mod {fname} already present, skipping')
+                        files_skipped += 1
+                        self.progress.emit(idx, total, f'{fname} (up to date)')
+                        continue
 
                 try:
                     data = http_get(url)
@@ -293,17 +417,31 @@ class CampaignDownloader(QThread):
                     dest.write_bytes(data)
                     print(f'[DOWNLOAD] ✓ Saved mod {dest}')
                     files_downloaded += 1
+
+                    # Track in global registry (shared across campaigns)
+                    self.settings.register_mod_file(
+                        fname,
+                        self.settings.compute_file_hash(dest),
+                        version=self.campaign.get('version', '1.0'),
+                        campaigns=[slug],
+                    )
                 except Exception as e:
                     print(f'[DOWNLOAD] ✗ Failed mod {fname}: {e}')
                     files_failed += 1
 
             # Report actual results
-            if files_failed > 0 and files_downloaded == 0:
+            total_needed = files_downloaded + files_failed
+            if files_failed > 0 and files_downloaded == 0 and files_skipped == 0:
                 self.finished_signal.emit(False, f'All downloads failed for {slug}')
             elif files_failed > 0:
-                self.finished_signal.emit(False, f'Downloaded {files_downloaded}/{total} files. {files_failed} failed')
+                self.finished_signal.emit(False,
+                    f'Downloaded {files_downloaded}/{total_needed} files. '
+                    f'{files_failed} failed, {files_skipped} shared mods skipped')
             else:
-                self.finished_signal.emit(True, f'Installed {files_downloaded} files for {slug}')
+                msg = f'Installed {files_downloaded} files for {slug}'
+                if files_skipped:
+                    msg += f' ({files_skipped} shared mods already present)'
+                self.finished_signal.emit(True, msg)
 
         except Exception as e:
             import traceback
@@ -314,7 +452,7 @@ class CampaignDownloader(QThread):
         slug = self.campaign['slug']
         lower = filename.lower()
 
-        # Check if it's actually a mod file based on extension
+        # Mods ALWAYS go to SC2/Mods/ (required for SC2 to detect them)
         if is_mod or lower.endswith('.sc2mod'):
             return self.sc2_root / 'Mods' / filename
         elif lower.endswith('.sc2map'):
@@ -323,7 +461,6 @@ class CampaignDownloader(QThread):
             cache_dir = Path.home() / '.cache' / 'sc2_campaign_launcher' / 'assets' / slug
             return cache_dir / filename
         else:
-            # Default to Maps folder for unknown files
             return self.sc2_root / 'Maps' / slug / filename
 
 class CampaignCard(QFrame):
@@ -508,7 +645,7 @@ class CampaignCard(QFrame):
             self._launch()
 
     def _download(self):
-        self._downloader = CampaignDownloader(self.campaign, self.settings.sc2_root())
+        self._downloader = CampaignDownloader(self.campaign, self.settings.sc2_root(), self.settings)
         # Send to status_label instead of button
         self._downloader.progress.connect(
             lambda c, t, m: self.status_label.setText(f'{m[:40]}...' if len(m) > 40 else m)
@@ -618,7 +755,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.settings = settings
         self.setWindowTitle('Settings')
-        self.resize(600, 250)
+        self.resize(600, 320)
 
         lay = QVBoxLayout(self)
 
@@ -642,19 +779,32 @@ class SettingsDialog(QDialog):
         row.addWidget(b)
         lay.addLayout(row)
 
-        # Show derived paths (read-only, for confirmation)
+        # Auto-detected section
         lay.addWidget(QLabel('<hr><b>Auto-detected:</b>'))
 
-        derived_lay = QVBoxLayout()
-        self.prefix_label = QLabel(f'Wine prefix: {self.settings.wine_prefix()}')
-        self.prefix_label.setStyleSheet('color: #999; font-size: 11px;')
-        derived_lay.addWidget(self.prefix_label)
+        # Wine prefix (auto-detected by default, editable when checkbox unchecked)
+        row = QHBoxLayout()
+        row.addWidget(QLabel('Wine prefix:'))
+        self.prefix_in = QLineEdit(settings.wine_prefix())
+        self.prefix_in.setEnabled(not settings.use_auto_prefix())
+        b = QPushButton('Browse')
+        b.clicked.connect(self._b_pfx)
+        row.addWidget(self.prefix_in)
+        row.addWidget(b)
+        lay.addLayout(row)
 
-        self.switcher_label = QLabel(f'Switcher: {self.settings.sc2_switcher_path()}')
+        self.auto_prefix_check = QCheckBox('Auto-detect Wine prefix from SC2 Installation')
+        self.auto_prefix_check.setChecked(settings.use_auto_prefix())
+        self.auto_prefix_check.stateChanged.connect(self._toggle_auto_prefix)
+        lay.addWidget(self.auto_prefix_check)
+
+        # Switcher path (read-only, below the prefix)
+        self.switcher_label = QLabel(f'Switcher: {settings.sc2_switcher_path()}')
         self.switcher_label.setStyleSheet('color: #999; font-size: 11px;')
         self.switcher_label.setWordWrap(True)
-        derived_lay.addWidget(self.switcher_label)
-        lay.addLayout(derived_lay)
+        lay.addWidget(self.switcher_label)
+
+        # Buttons (keep the existing buttons block below this)
 
         # Buttons
         btns = QHBoxLayout()
@@ -676,7 +826,7 @@ class SettingsDialog(QDialog):
             if 'drive_c' in root_str:
                 drive_c_idx = root_str.index('drive_c')
                 prefix = root_str[:drive_c_idx].rstrip('/')
-                self.prefix_label.setText(f'Wine prefix: {prefix}')
+                self.prefix_in.setText(prefix)
             switcher = Path(p) / 'Support64' / 'SC2Switcher_x64.exe'
             self.switcher_label.setText(f'Switcher: {switcher}')
 
@@ -690,10 +840,36 @@ class SettingsDialog(QDialog):
                     p = str(parent)
             self.wine_in.setText(p)
 
+    def _toggle_auto_prefix(self):
+        """Enable/disable manual prefix input based on checkbox"""
+        auto_enabled = self.auto_prefix_check.isChecked()
+        self.prefix_in.setEnabled(not auto_enabled)
+
+        # Update prefix display: show detected path when auto-enabled
+        if auto_enabled:
+            detected_prefix = self.settings.wine_prefix()
+            self.prefix_in.setText(detected_prefix)
+        # When disabled, keep the current user-entered value
+
+    def _b_pfx(self):
+        """Browse for Wine prefix directory"""
+        p = QFileDialog.getExistingDirectory(self, 'Select Wine Prefix Directory')
+        if p:
+            self.prefix_in.setText(p)
+
     def _save(self):
         self.settings.set_sc2_root(Path(self.sc2_in.text()))
         self.settings.set_wine_binary(self.wine_in.text())
-        # self.accept()
+
+        # Save auto-prefix preference
+        use_auto = self.auto_prefix_check.isChecked()
+        self.settings.set_use_auto_prefix(use_auto)
+
+        # Save manual prefix override only if not using auto-prefix
+        if not use_auto:
+            self.settings.set_wine_prefix_override(self.prefix_in.text())
+
+        self.accept()
 
 class MainWindow(QMainWindow):
     def __init__(self, settings: AppSettings):

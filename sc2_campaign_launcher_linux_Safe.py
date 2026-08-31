@@ -10,7 +10,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QScrollArea, QFrame, QFileDialog,
-    QDialog, QLineEdit, QMessageBox, QGridLayout
+    QDialog, QLineEdit, QMessageBox, QGridLayout, QCheckBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings, QRect
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont
@@ -100,6 +100,42 @@ class AppSettings:
             installed.remove(slug)
             self.set_installed_campaigns(installed)
             print(f'[SETTINGS] Removed {slug} from installed campaigns')
+
+    def wine_prefix_override(self) -> str | None:
+        """Get manually set wine prefix override (if any)"""
+        val = self.settings.value('wine_prefix_override', type=str)
+        return val if val else None
+
+    def set_wine_prefix_override(self, prefix: str | None):
+        """Set or clear manual wine prefix override"""
+        if prefix:
+            self.settings.setValue('wine_prefix_override', prefix)
+        else:
+            self.settings.remove('wine_prefix_override')
+
+    def use_auto_prefix(self) -> bool:
+        """Check if automatic prefix detection is enabled"""
+        return self.settings.value('use_auto_prefix', True, type=bool) == True
+
+    def set_use_auto_prefix(self, enabled: bool):
+        """Toggle automatic prefix detection"""
+        self.settings.setValue('use_auto_prefix', enabled)
+
+    def wine_prefix(self) -> str:
+        """Derive Wine prefix from SC2 root by stripping everything after drive_c"""
+        if self.use_auto_prefix():
+            root_str = str(self.sc2_root())
+            if 'drive_c' in root_str:
+                # e.g. /home/f/.../drive_c/Program Files (x86)/StarCraft II → /home/f/...
+                drive_c_idx = root_str.index('drive_c')
+                return root_str[:drive_c_idx].rstrip('/')
+            # Fallback: try stored override
+            val = self.wine_prefix_override()
+            return val if val else ''
+        else:
+            # Manual override takes precedence
+            val = self.wine_prefix_override()
+            return val if val else ''
 
 def http_get(url: str) -> bytes:
     """Simple HTTP GET with a proper User-Agent. Raises on error."""
@@ -618,7 +654,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.settings = settings
         self.setWindowTitle('Settings')
-        self.resize(600, 250)
+        self.resize(600, 320)
 
         lay = QVBoxLayout(self)
 
@@ -642,19 +678,32 @@ class SettingsDialog(QDialog):
         row.addWidget(b)
         lay.addLayout(row)
 
-        # Show derived paths (read-only, for confirmation)
+        # Auto-detected section
         lay.addWidget(QLabel('<hr><b>Auto-detected:</b>'))
 
-        derived_lay = QVBoxLayout()
-        self.prefix_label = QLabel(f'Wine prefix: {self.settings.wine_prefix()}')
-        self.prefix_label.setStyleSheet('color: #999; font-size: 11px;')
-        derived_lay.addWidget(self.prefix_label)
+        # Wine prefix (auto-detected by default, editable when checkbox unchecked)
+        row = QHBoxLayout()
+        row.addWidget(QLabel('Wine prefix:'))
+        self.prefix_in = QLineEdit(settings.wine_prefix())
+        self.prefix_in.setEnabled(not settings.use_auto_prefix())
+        b = QPushButton('Browse')
+        b.clicked.connect(self._b_pfx)
+        row.addWidget(self.prefix_in)
+        row.addWidget(b)
+        lay.addLayout(row)
 
-        self.switcher_label = QLabel(f'Switcher: {self.settings.sc2_switcher_path()}')
+        self.auto_prefix_check = QCheckBox('Auto-detect Wine prefix from SC2 Installation')
+        self.auto_prefix_check.setChecked(settings.use_auto_prefix())
+        self.auto_prefix_check.stateChanged.connect(self._toggle_auto_prefix)
+        lay.addWidget(self.auto_prefix_check)
+
+        # Switcher path (read-only, below the prefix)
+        self.switcher_label = QLabel(f'Switcher: {settings.sc2_switcher_path()}')
         self.switcher_label.setStyleSheet('color: #999; font-size: 11px;')
         self.switcher_label.setWordWrap(True)
-        derived_lay.addWidget(self.switcher_label)
-        lay.addLayout(derived_lay)
+        lay.addWidget(self.switcher_label)
+
+        # Buttons (keep the existing buttons block below this)
 
         # Buttons
         btns = QHBoxLayout()
@@ -689,6 +738,37 @@ class SettingsDialog(QDialog):
                 if (parent / 'toolmanifest.vdf').exists():
                     p = str(parent)
             self.wine_in.setText(p)
+
+    def _toggle_auto_prefix(self):
+        """Enable/disable manual prefix input based on checkbox"""
+        auto_enabled = self.auto_prefix_check.isChecked()
+        self.prefix_in.setEnabled(not auto_enabled)
+
+        # Update prefix display: show detected path when auto-enabled
+        if auto_enabled:
+            detected_prefix = self.settings.wine_prefix()
+            self.prefix_in.setText(detected_prefix)
+        # When disabled, keep the current user-entered value
+
+    def _b_pfx(self):
+        """Browse for Wine prefix directory"""
+        p = QFileDialog.getExistingDirectory(self, 'Select Wine Prefix Directory')
+        if p:
+            self.prefix_in.setText(p)
+
+    def _save(self):
+        self.settings.set_sc2_root(Path(self.sc2_in.text()))
+        self.settings.set_wine_binary(self.wine_in.text())
+
+        # Save auto-prefix preference
+        use_auto = self.auto_prefix_check.isChecked()
+        self.settings.set_use_auto_prefix(use_auto)
+
+        # Save manual prefix override only if not using auto-prefix
+        if not use_auto:
+            self.settings.set_wine_prefix_override(self.prefix_in.text())
+
+        self.accept()
 
     def _save(self):
         self.settings.set_sc2_root(Path(self.sc2_in.text()))
