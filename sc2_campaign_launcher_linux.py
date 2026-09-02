@@ -253,6 +253,27 @@ class AppSettings:
             self.set_installed_campaigns(installed)
             print(f'[SETTINGS] Removed {slug} from installed campaigns')
 
+    def validate_all_campaign_statuses(self, campaigns: list[dict]) -> list[dict]:
+        """Re-check disk state for all campaigns and update their status fields."""
+        for camp in campaigns:
+            folder = camp.get('folder') or camp['slug']
+            maps_dir = self.sc2_root() / 'Maps' / folder
+
+            maps_list = camp.get('maps', [])
+            mods_list = camp.get('mods', [])
+
+            maps_ok = all((maps_dir / m['name']).exists() for m in maps_list)
+            mods_ok = all(self.is_mod_current(mo['name'], mo.get('sha256')) for mo in mods_list)
+
+            if not maps_ok:
+                camp['status'] = 'not_installed'
+            elif not mods_ok:
+                camp['status'] = 'update_available'
+            else:
+                camp['status'] = 'installed'
+
+        return campaigns
+
     def wine_prefix_override(self) -> str | None:
         """Get manually set wine prefix override (if any)"""
         val = self.settings.value('wine_prefix_override', type=str)
@@ -838,6 +859,8 @@ class CampaignCard(QFrame):
             self.btn.setEnabled(True)
             self.settings.add_campaign_to_installed(self.campaign['slug'])
             self.status_label.setText('Ready')
+            # Trigger re-validation of OTHER cards that depend on shared mods
+            self.removed.emit(self.campaign['slug'])  # existing signal, just re-use it
         else:
             self.btn.setEnabled(True)
             self._style_btn()   # restores correct text/color for current status
@@ -1044,14 +1067,31 @@ class SettingsDialog(QDialog):
         self.switcher_label.setWordWrap(True)
         lay.addWidget(self.switcher_label)
 
-        # Buttons (keep the existing buttons block below this)
-
         # Buttons
         btns = QHBoxLayout()
         btns.addStretch()
+
+        # Refresh (maintenance only)
+        r = QPushButton('Refresh')
+        r.setMinimumWidth(80)
+        r.setStyleSheet(
+            'QPushButton { background: #3a3a3a; color: #aaa; border: none; '
+            'border-radius: 4px; padding: 5px 12px; font-size: 11px; }'
+            'QPushButton:hover { background: #4a4a4a; color: white; }')
+        r.clicked.connect(self._refresh_campaigns)
+        btns.addWidget(r)
+
         s = QPushButton('Save')
+        s.setStyleSheet(
+            'QPushButton { background: #3498db; color: white; border: none; '
+            'border-radius: 4px; padding: 6px 14px; }'
+            'QPushButton:hover { background: #2980b9; }')
         s.clicked.connect(self._save)
         c = QPushButton('Cancel')
+        c.setStyleSheet(
+            'QPushButton { background: #3a3a3a; color: white; border: none; '
+            'border-radius: 4px; padding: 6px 14px; }'
+            'QPushButton:hover { background: #4a4a4a; }')
         c.clicked.connect(self.reject)
         btns.addWidget(s)
         btns.addWidget(c)
@@ -1139,6 +1179,13 @@ class SettingsDialog(QDialog):
         if p:
             self.sc2_in.setText(p)
             self._preview_paths(p)
+
+    def _refresh_campaigns(self):
+        """Reload campaigns without closing settings"""
+        if hasattr(self.parent(), 'load_campaigns'):
+            self.parent().load_campaigns()
+        else:
+            print('[SETTINGS] Warning: parent has no load_campaigns method')
 
     ADD_CUSTOM = '\u2795 Add custom Wine/Proton\u2026'
 
@@ -1428,6 +1475,19 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = settings
         self._fetcher = None
+
+        # Wayland window identification
+        self.setWindowRole('SC2CampaignLauncher')
+        self.setWindowTitle('SC2 Campaign Launcher')
+
+        # Also set window icon on the main window itself
+        from PyQt6.QtGui import QIcon
+        icon_path = self.settings.asset_dir() / 'logo.png'
+        if not icon_path.exists():
+            icon_path = Path(__file__).parent / 'assets' / 'logo.png'
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+
         self._setup_ui()
         self.load_campaigns()
 
@@ -1448,20 +1508,6 @@ class MainWindow(QMainWindow):
 
         # Header row with logo, title, and social links
         hdr = QHBoxLayout()
-
-        # App logo (top left)
-        logo_label = QLabel()
-        logo_label.setFixedSize(48, 48)
-        logo_label.setToolTip('Solarite — SC2 Campaign Launcher')
-        if self._load_icon(logo_label, 'logo.png', 48, 48):
-            pass
-        else:
-            pm = QPixmap(48, 48); pm.fill(QColor('#2a2a2a'))
-            p = QPainter(pm); p.setPen(QColor('#6d4aff'))
-            p.setFont(QFont('Arial', 16, QFont.Weight.Bold))
-            p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, 'S')
-            p.end(); logo_label.setPixmap(pm)
-        hdr.addWidget(logo_label)
 
         t = QLabel('SC2 Campaign Launcher')
         t.setFont(QFont('Arial', 18, QFont.Weight.Bold))
@@ -1486,15 +1532,6 @@ class MainWindow(QMainWindow):
             patreon_label.setCursor(Qt.CursorShape.PointingHandCursor)
             patreon_label.mousePressEvent = lambda e: self._open_patreon()
         hdr.addWidget(patreon_label)
-
-        self.refresh_btn = QPushButton('Refresh')
-        self.refresh_btn.setStyleSheet(
-            'QPushButton { background: #3a3a3a; color: white; border: 1px solid #4a4a4a; '
-            'border-radius: 4px; padding: 6px 14px; }'
-            'QPushButton:hover { background: #4a4a4a; }'
-            'QPushButton:disabled { color: #666; }')
-        self.refresh_btn.clicked.connect(self.load_campaigns)
-        hdr.addWidget(self.refresh_btn)
 
         s = QPushButton('Settings')
         s.setStyleSheet(
@@ -1570,8 +1607,8 @@ class MainWindow(QMainWindow):
 
     def load_campaigns(self):
         print('[MAIN] Loading campaigns...')
-        self.refresh_btn.setEnabled(False)
-        self.refresh_btn.setText('Loading...')
+        # Removed: self.refresh_btn.setEnabled(False)
+        # Removed: self.refresh_btn.setText('Loading...')
 
         self._fetcher = MapsJsonFetcher(self.settings.sc2_root(), self.settings)
         self._fetcher.finished_signal.connect(self._on_loaded)
@@ -1579,8 +1616,12 @@ class MainWindow(QMainWindow):
 
     def _on_loaded(self, campaigns: list):
         print(f'[MAIN] Received {len(campaigns)} campaigns from fetcher')
-        self.refresh_btn.setEnabled(True)
-        self.refresh_btn.setText('Refresh')
+        # Removed: self.refresh_btn.setEnabled(True)
+        # Removed: self.refresh_btn.setText('Refresh')
+
+        # Re-validate against current disk state (important after downloads)
+        campaigns = self.settings.validate_all_campaign_statuses(campaigns)
+
         self._clear_grid()
 
         if not campaigns:
@@ -1603,11 +1644,30 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
+
+    # Set application-wide window icon (loads from assets)
+    from PyQt6.QtCore import QCoreApplication
+    from PyQt6.QtGui import QIcon
+
+    QCoreApplication.setApplicationName('SC2CampaignLauncher')
+    QCoreApplication.setOrganizationName('SC2CampaignLauncher')
+    QCoreApplication.setApplicationVersion('1.0')
+
     settings = AppSettings()
+    icon_path = settings.asset_dir() / 'logo.png'
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
+    else:
+        # Fallback to dev path
+        fallback = Path(__file__).parent / 'assets' / 'logo.png'
+        if fallback.exists():
+            app.setWindowIcon(QIcon(str(fallback)))
+
+    settings = AppSettings()  # Re-instantiate after icon setup
 
     if settings.is_first_run():
         wiz = FirstRunWizard(settings)
-        wiz.exec()   # finishing internally sets first_run_done; cancelling leaves the flag
+        wiz.exec()
 
     w = MainWindow(settings)
     w.show()

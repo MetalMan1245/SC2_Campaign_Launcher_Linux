@@ -16,7 +16,7 @@ ASSET_DEST=""
 # Detect installation state
 LOCAL_INSTALLED=0
 GLOBAL_INSTALLED=0
-INSTALLED_SCOPE=""  # "local", "global", "both", or ""
+INSTALLED_SCOPE=""  # "local", "global", "both", or "custom"
 
 check_install_state() {
     [[ -f "$LOCAL_BIN/$SCRIPT_NAME" ]] && LOCAL_INSTALLED=1
@@ -29,7 +29,7 @@ check_install_state() {
     elif [[ $GLOBAL_INSTALLED -eq 1 ]]; then
         INSTALLED_SCOPE="global"
     else
-        INSTALLED_SCOPE=""
+        INSTALLED_SCOPE="custom"
     fi
 }
 
@@ -142,6 +142,37 @@ install_common() {
     install -m 755 "./$SCRIPT_NAME" "$DEST_BIN/$SCRIPT_NAME"
     [[ -d ./assets ]] && cp -r ./assets/. "$ASSET_DEST/"
 
+    # ---- Icon installation (CRITICAL FIX: system icon theme directories) ----
+    if [[ "$SCOPE" == "global" ]]; then
+        # Global: /usr/share/icons/
+        ICON_DIR="/usr/share/icons/hicolor/48x48/apps"
+        mkdir -p "$ICON_DIR"
+        cp "$ASSET_DEST/logo.png" "$ICON_DIR/sc2-campaign-launcher.png"
+    else
+        # Local: ~/.local/share/icons/
+        ICON_DIR="$HOME/.local/share/icons/hicolor/48x48/apps"
+        mkdir -p "$ICON_DIR"
+        cp "$ASSET_DEST/logo.png" "$ICON_DIR/sc2-campaign-launcher.png"
+    fi
+
+    # ---- Write .desktop file ONCE (no duplicates) ----
+    DESKTOP_FILE="$DESKTOP_DIR/sc2-campaign-launcher.desktop"
+    {
+        echo '[Desktop Entry]'
+        echo 'Type=Application'
+        echo "Name=$APP_TITLE"
+        echo 'Comment=Synergys Mod Launcher for Linux'
+        echo "Exec=env QT_QPA_PLATFORM=xcb $DEST_BIN/$SCRIPT_NAME"
+        echo 'Icon=sc2-campaign-launcher'
+        echo 'Terminal=false'
+        echo "StartupWMClass=SC2CampaignLauncher"
+        echo 'X-KDE-StartupNotify=true'
+        echo 'X-GNOME-Autostart-enabled=true'
+        echo 'Categories=Game;'
+        echo 'Keywords=StarCraft;SC2;Campaign;Launcher;'
+    } > "$DESKTOP_FILE"
+
+    # Record install scope in App.conf
     python3 - "$SCOPE" <<'PY' 2>/dev/null || \
     echo "NOTE: could not record install scope in App.conf — set install_scope manually in Settings if assets don't load."
 import sys
@@ -149,30 +180,20 @@ from PyQt6.QtCore import QSettings
 QSettings('SC2CampaignLauncher', 'App').setValue('install_scope', sys.argv[1])
 PY
 
-    # ---- Icon: prefer PNG, fall back to ICO ----
-    ICON_FILE=""
-    for cand in "$ASSET_DEST/logo.png" "$ASSET_DEST/app.ico"; do
-        [[ -f "$cand" ]] && ICON_FILE="$cand" && break
-    done
-
-    DESKTOP_FILE="$DESKTOP_DIR/sc2-campaign-launcher.desktop"
-    {
-        echo '[Desktop Entry]'
-        echo 'Type=Application'
-        echo "Name=$APP_TITLE"
-        echo 'Comment=Synergys Mod Launcher for Linux'
-        echo "Exec=$DEST_BIN/$SCRIPT_NAME"
-        [[ -n "$ICON_FILE" ]] && echo "Icon=$ICON_FILE"
-        echo 'Terminal=false'
-        echo 'Categories=Game;'
-    } > "$DESKTOP_FILE"
-
+    # Update desktop database
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+
+    # Refresh icon cache (critical for icon to appear)
+    if [[ "$SCOPE" == "global" ]]; then
+        sudo gtk-update-icon-cache -t -f /usr/share/icons/hicolor/ 2>/dev/null || true
+    else
+        gtk-update-icon-cache -t -f "$HOME/.local/share/icons/hicolor/" 2>/dev/null || true
+    fi
 
     echo "Installed successfully:"
     echo "  Script  → $DEST_BIN/$SCRIPT_NAME"
     echo "  Assets  → $ASSET_DEST"
-    echo "  Icon    → ${ICON_FILE:-none}"
+    echo "  Icon    → sc2-campaign-launcher (theme icon)"
     echo "  Desktop → $DESKTOP_FILE"
     if [[ ":$PATH:" != *":$LOCAL_BIN:"* ]] && [[ "$DEST_BIN" == "$LOCAL_BIN" ]]; then
         echo "NOTE: $LOCAL_BIN is not in PATH — add it, or launch via the desktop entry."
