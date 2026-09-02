@@ -1,3 +1,4 @@
+#!/usr/bin/env xdg-open
 [Desktop Entry]
 Type=Application
 Name=SC2 Campaign Launcher Installer
