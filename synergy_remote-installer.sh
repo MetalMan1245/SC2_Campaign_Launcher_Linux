@@ -15,7 +15,7 @@ curl -fsSL \
 
 echo "[Remote Installer] Extracting..."
 unzip -q repo.zip
-cd SC2_Campaign_Launcher_Linux
+cd SC2_Campaign_Launcher_Linux-main
 
 echo "[Remote Installer] Running installer..."
 chmod +x install-uninstall-SC2CLL.sh
