@@ -5,19 +5,13 @@ Note that this project does currently work for me, but is absolutely NOT ready f
 
 # Upcoming Features (roughly in order of importance)
 
-Add prompt for SC2 and Wine discovery on first launch.
-
-Installer that detects distro and installs dependencies, creates .desktop shortcut and can uninstall.
-
-Add solarite icon and links.
+Add info and settings icons if they fit the Linux UI.
 
 Add support for moving campaigns when wine prefix is changed (or at least remove previous campaigns, launcher will still think campaigns are installed if Wine prefix is changed).
 
-Write out dependencies for this, python, PyQt6, and umu-launcher for sure.
-
 Add a "last updated" field in campaign details.
 
-Add percentage to download indicator.
+Updater to install/uninstall script.
 
 # License
 

@@ -379,22 +379,6 @@ class AppSettings:
     def set_first_run_done(self):
         self.settings.setValue('first_run_done', True)
 
-    def install_scope(self) -> str:
-        return self.settings.value('install_scope', 'local', type=str)
-
-    def set_install_scope(self, scope: str):
-        self.settings.setValue('install_scope', scope)
-
-    def asset_dir(self) -> Path:
-        scope = self.install_scope()
-        if scope == 'global':
-            return Path('/usr/share/SC2CampaignLauncher/assets')
-        if scope == 'custom':
-            custom = self.settings.value('custom_asset_dir', type=str)
-            if custom:
-                return Path(custom)
-        return Path.home() / '.local' / 'share' / 'SC2CampaignLauncher/assets'
-
 def http_get(url: str) -> bytes:
     """Simple HTTP GET with a proper User-Agent. Raises on error."""
     print(f'[HTTP] GET {url}')
@@ -619,28 +603,29 @@ class CampaignCard(QFrame):
         lay.setSpacing(8)
         lay.setContentsMargins(12, 12, 12, 12)
 
-        # Cover with overlay icon buttons (delete top-left, info top-right)
+        # Cover with overlay icons (delete top-left, info top-right)
         cover = QLabel()
         cover.setFixedSize(256, 144)
         cover.setStyleSheet('background: #1a1a1a; border-radius: 4px;')
         cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        # Overlay buttons (transparent background, icon from assets)
-        self.del_btn = QLabel(cover)
-        self.del_btn.setFixedSize(28, 28)
-        self.del_btn.move(4, 4)
-        self.del_btn.setToolTip('Delete campaign')
-        self.del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.del_btn.mousePressEvent = lambda e: self._delete()
-        self._load_icon(self.del_btn, 'settings.png', 28, 28)
+        icon_style = ('QPushButton { background: rgba(0,0,0,140); color: white; '
+                      'border: none; border-radius: 4px; font-size: 15px; }'
+                      'QPushButton:hover { background: rgba(100,100,100,180); }')
 
-        self.info_btn = QLabel(cover)
-        self.info_btn.setFixedSize(28, 28)
-        self.info_btn.move(256 - 32, 4)
+        self.del_btn = QPushButton('🗑', cover)
+        self.del_btn.setGeometry(4, 4, 28, 28)
+        self.del_btn.setToolTip('Delete campaign')
+        self.del_btn.setStyleSheet(icon_style)
+        self.del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.del_btn.clicked.connect(self._delete)
+
+        self.info_btn = QPushButton('ℹ', cover)
+        self.info_btn.setGeometry(256 - 32, 4, 28, 28)
         self.info_btn.setToolTip('Campaign info')
+        self.info_btn.setStyleSheet(icon_style)
         self.info_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.info_btn.mousePressEvent = lambda e: self._info()
-        self._load_icon(self.info_btn, 'info.png', 28, 28)
+        self.info_btn.clicked.connect(self._info)
 
         if self.campaign.get('description'):
             # Rich text — HTML in mapinfo.json (e.g. <b>, <br>) renders in the tooltip
@@ -773,25 +758,6 @@ class CampaignCard(QFrame):
         p.drawText(margins, Qt.AlignmentFlag.AlignCenter, self.campaign['name'][:30])
         p.end()
         label.setPixmap(pm)
-
-    def _load_icon(self, label: QLabel, filename: str, w: int, h: int) -> bool:
-        """Load an icon from assets using scope-aware resolution."""
-        # Try app's asset dir first (install location)
-        asset_path = self.settings.asset_dir() / filename
-        if not asset_path.exists():
-            # Fall back to dev layout
-            asset_path = Path(__file__).parent / 'assets' / filename
-
-        if not asset_path.exists():
-            return False
-
-        pm = QPixmap(str(asset_path))
-        if pm.isNull():
-            return False
-        pm = pm.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio,
-                       Qt.TransformationMode.SmoothTransformation)
-        label.setPixmap(pm)
-        return True
 
     def _style_btn(self):
         st = self.campaign['status']
@@ -1469,23 +1435,16 @@ class MainWindow(QMainWindow):
         hdr.addWidget(t)
         hdr.addStretch()
 
-        # Discord icon
-        discord_label = QLabel()
-        discord_label.setFixedSize(40, 40)
-        if self._load_icon(discord_label, 'discord.png', 40, 40):
-            discord_label.setToolTip('Join our Discord')
-            discord_label.setCursor(Qt.CursorShape.PointingHandCursor)
-            discord_label.mousePressEvent = lambda e: self._open_discord()
-        hdr.addWidget(discord_label)
-
-        # Patreon icon
-        patreon_label = QLabel()
-        patreon_label.setFixedSize(40, 40)
-        if self._load_icon(patreon_label, 'patreon.png', 40, 40):
-            patreon_label.setToolTip('Support on Patreon')
-            patreon_label.setCursor(Qt.CursorShape.PointingHandCursor)
-            patreon_label.mousePressEvent = lambda e: self._open_patreon()
-        hdr.addWidget(patreon_label)
+        for fname, url, tip in (('discord.png', 'https://discord.gg/adK8CeHtRa', 'Join the Discord'),
+                                 ('patreon.png', 'https://www.patreon.com/SynergySC2', 'Support on Patreon')):
+            lab = QLabel()
+            lab.setFixedSize(40, 40)
+            if self._load_icon(lab, fname, 40, 40):
+                lab.setToolTip(tip)
+                lab.setCursor(Qt.CursorShape.PointingHandCursor)
+                target = url
+                lab.mousePressEvent = lambda e, u=target: QDesktopServices.openUrl(QUrl(u))
+            hdr.addWidget(lab)
 
         self.refresh_btn = QPushButton('Refresh')
         self.refresh_btn.setStyleSheet(
@@ -1504,7 +1463,7 @@ class MainWindow(QMainWindow):
         s.clicked.connect(self._open_settings)
         hdr.addWidget(s)
 
-        main.addLayout(hdr)
+        main.addLayout(hdr)   # ← exactly ONE call to this in the whole method
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1561,12 +1520,6 @@ class MainWindow(QMainWindow):
                       Qt.TransformationMode.SmoothTransformation)
         label.setPixmap(pm)
         return True
-
-    def _open_discord(self):
-        QDesktopServices.openUrl(QUrl('https://discord.gg/adK8CeHtRa'))
-
-    def _open_patreon(self):
-        QDesktopServices.openUrl(QUrl('https://www.patreon.com/SynergySC2'))
 
     def load_campaigns(self):
         print('[MAIN] Loading campaigns...')

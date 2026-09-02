@@ -12,15 +12,15 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QScrollArea, QFrame, QFileDialog,
-    QDialog, QLineEdit, QMessageBox, QGridLayout, QCheckBox, QComboBox, QInputDialog
+    QDialog, QLineEdit, QMessageBox, QGridLayout, QCheckBox, QComboBox, QInputDialog, QStackedWidget
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings, QRect
-from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings, QRect, QUrl
+from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont, QDesktopServices
 
 GITHUB_REPO = 'R-P-S/SC2Campaigns'
 GITHUB_BRANCH = 'main'
 MAPS_JSON_URL = f'https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/maps.json'
-DEFAULT_SC2_ROOT = Path.home() / '.local' / 'share' / 'StarCraft II'
+DEFAULT_SC2_ROOT = Path.home() / 'Games'
 
 AUTHOR_OVERRIDE = {
     'uedfl': 'Oracle',
@@ -373,6 +373,28 @@ class AppSettings:
     def set_wine_discovery_done(self):
         self.settings.setValue('wine_discovery_done', True)
 
+    def is_first_run(self) -> bool:
+        return not self.settings.value('first_run_done', False, type=bool)
+
+    def set_first_run_done(self):
+        self.settings.setValue('first_run_done', True)
+
+    def install_scope(self) -> str:
+        return self.settings.value('install_scope', 'local', type=str)
+
+    def set_install_scope(self, scope: str):
+        self.settings.setValue('install_scope', scope)
+
+    def asset_dir(self) -> Path:
+        scope = self.install_scope()
+        if scope == 'global':
+            return Path('/usr/share/SC2CampaignLauncher/assets')
+        if scope == 'custom':
+            custom = self.settings.value('custom_asset_dir', type=str)
+            if custom:
+                return Path(custom)
+        return Path.home() / '.local' / 'share' / 'SC2CampaignLauncher/assets'
+
 def http_get(url: str) -> bytes:
     """Simple HTTP GET with a proper User-Agent. Raises on error."""
     print(f'[HTTP] GET {url}')
@@ -597,29 +619,28 @@ class CampaignCard(QFrame):
         lay.setSpacing(8)
         lay.setContentsMargins(12, 12, 12, 12)
 
-        # Cover with overlay icons (delete top-left, info top-right)
+        # Cover with overlay icon buttons (delete top-left, info top-right)
         cover = QLabel()
         cover.setFixedSize(256, 144)
         cover.setStyleSheet('background: #1a1a1a; border-radius: 4px;')
         cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        icon_style = ('QPushButton { background: rgba(0,0,0,140); color: white; '
-                      'border: none; border-radius: 4px; font-size: 15px; }'
-                      'QPushButton:hover { background: rgba(100,100,100,180); }')
-
-        self.del_btn = QPushButton('🗑', cover)
-        self.del_btn.setGeometry(4, 4, 28, 28)
+        # Overlay buttons (transparent background, icon from assets)
+        self.del_btn = QLabel(cover)
+        self.del_btn.setFixedSize(28, 28)
+        self.del_btn.move(4, 4)
         self.del_btn.setToolTip('Delete campaign')
-        self.del_btn.setStyleSheet(icon_style)
         self.del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.del_btn.clicked.connect(self._delete)
+        self.del_btn.mousePressEvent = lambda e: self._delete()
+        self._load_icon(self.del_btn, 'settings.png', 28, 28)
 
-        self.info_btn = QPushButton('ℹ', cover)
-        self.info_btn.setGeometry(256 - 32, 4, 28, 28)
+        self.info_btn = QLabel(cover)
+        self.info_btn.setFixedSize(28, 28)
+        self.info_btn.move(256 - 32, 4)
         self.info_btn.setToolTip('Campaign info')
-        self.info_btn.setStyleSheet(icon_style)
         self.info_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.info_btn.clicked.connect(self._info)
+        self.info_btn.mousePressEvent = lambda e: self._info()
+        self._load_icon(self.info_btn, 'info.png', 28, 28)
 
         if self.campaign.get('description'):
             # Rich text — HTML in mapinfo.json (e.g. <b>, <br>) renders in the tooltip
@@ -753,6 +774,25 @@ class CampaignCard(QFrame):
         p.end()
         label.setPixmap(pm)
 
+    def _load_icon(self, label: QLabel, filename: str, w: int, h: int) -> bool:
+        """Load an icon from assets using scope-aware resolution."""
+        # Try app's asset dir first (install location)
+        asset_path = self.settings.asset_dir() / filename
+        if not asset_path.exists():
+            # Fall back to dev layout
+            asset_path = Path(__file__).parent / 'assets' / filename
+
+        if not asset_path.exists():
+            return False
+
+        pm = QPixmap(str(asset_path))
+        if pm.isNull():
+            return False
+        pm = pm.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio,
+                       Qt.TransformationMode.SmoothTransformation)
+        label.setPixmap(pm)
+        return True
+
     def _style_btn(self):
         st = self.campaign['status']
         if st == 'not_installed':
@@ -782,11 +822,7 @@ class CampaignCard(QFrame):
 
     def _download(self):
         self._downloader = CampaignDownloader(self.campaign, self.settings.sc2_root(), self.settings)
-        # Route progress into the status label rather than the button
-        self._downloader.progress.connect(
-            lambda c, t, m: self.status_label.setText(
-                (m[:40] + '...') if len(m) > 40 else m)
-        )
+        self._downloader.progress.connect(self._on_progress)
         self._downloader.finished_signal.connect(self._done)
         self._downloader.start()
 
@@ -1203,6 +1239,190 @@ class SettingsDialog(QDialog):
 
         self.accept()
 
+class FirstRunWizard(QDialog):
+    def __init__(self, settings: AppSettings, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle('Welcome — SC2 Campaign Launcher')
+        self.resize(600, 300)
+        self._scanner = None
+
+        lay = QVBoxLayout(self)
+        self.stack = QStackedWidget()
+        lay.addWidget(self.stack)
+
+        # --- Page 1: SC2 ---
+        p1 = QWidget(); v1 = QVBoxLayout(p1)
+        v1.addWidget(QLabel('<b>Step 1 of 2 — Locate StarCraft II</b>'))
+        v1.addWidget(QLabel('Scan common locations, or browse manually.'))
+        row = QHBoxLayout()
+        self.sc2_in = QLineEdit(str(settings.sc2_root()))
+        row.addWidget(self.sc2_in)
+        b = QPushButton('Browse…'); b.clicked.connect(self._browse_sc2)
+        row.addWidget(b)
+        self.scan_btn = QPushButton('Scan…'); self.scan_btn.clicked.connect(self._scan_clicked)
+        row.addWidget(self.scan_btn)
+        v1.addLayout(row)
+        self.sc2_status = QLabel('')
+        self.sc2_status.setStyleSheet('color: #999; font-size: 11px;')
+        self.sc2_status.setWordWrap(True)
+        v1.addWidget(self.sc2_status)
+        v1.addStretch()
+        self.stack.addWidget(p1)
+
+        # --- Page 2: Wine/Proton ---
+        p2 = QWidget(); v2 = QVBoxLayout(p2)
+        v2.addWidget(QLabel('<b>Step 2 of 2 — Choose Wine/Proton version</b>'))
+        v2.addWidget(QLabel('Best available version is pre-selected.'))
+        self.wine_combo = QComboBox()
+        v2.addWidget(self.wine_combo)
+        self.wine_lbl = QLabel('')
+        self.wine_lbl.setStyleSheet('color: #e67e22; font-size: 11px;')
+        self.wine_lbl.setWordWrap(True)
+        v2.addWidget(self.wine_lbl)
+        v2.addStretch()
+        self.stack.addWidget(p2)
+
+        # --- Nav ---
+        nav = QHBoxLayout()
+        nav.addStretch()
+        self.back_btn = QPushButton('Back'); self.back_btn.clicked.connect(self._back)
+        nav.addWidget(self.back_btn)
+        self.next_btn = QPushButton('Next'); self.next_btn.clicked.connect(self._next)
+        nav.addWidget(self.next_btn)
+        lay.addLayout(nav)
+        self._to_page(0)
+
+    # ---------- navigation ----------
+    def _to_page(self, idx: int):
+        self.stack.setCurrentIndex(idx)
+        self.back_btn.setVisible(idx > 0)
+        self.next_btn.setText('Finish' if idx == 1 else 'Next')
+        if idx == 1:
+            self._populate_wine()
+
+    def _back(self):
+        self._to_page(0)
+
+    def _next(self):
+        if self.stack.currentIndex() == 0:
+            root = self.sc2_in.text().strip()
+            if not root:
+                self.sc2_status.setText('Enter or scan for a path first.')
+                return
+            if not _is_sc2_root(Path(root)):
+                ret = QMessageBox.question(
+                    self, 'Unusual Path',
+                    f'{root}\ndoes not contain Support64/SC2Switcher_x64.exe.\n'
+                    'Use this path anyway?',
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if ret != QMessageBox.StandardButton.Yes:
+                    return
+            self._to_page(1)
+        else:
+            self._finish()
+
+    def _finish(self):
+        root = self.sc2_in.text().strip()
+        if root:
+            self.settings.set_sc2_root(Path(root))
+        data = self.wine_combo.currentData()
+        if data:
+            self.settings.set_wine_binary(data)
+        self.settings.set_first_run_done()
+        print(f'[WIZARD] SC2 root: {root}; wine: {data}')
+        self.accept()
+
+    # ---------- SC2 discovery ----------
+    def _browse_sc2(self):
+        p = QFileDialog.getExistingDirectory(self, 'Select StarCraft II Directory')
+        if p:
+            self.sc2_in.setText(p)
+            self._validate_sc2(Path(p))
+
+    def _validate_sc2(self, p: Path):
+        if _is_sc2_root(p):
+            self.sc2_status.setText(f'✓ Looks good — switcher: '
+                                     f'{p / "Support64" / "SC2Switcher_x64.exe"}')
+        else:
+            self.sc2_status.setText('No Support64/SC2Switcher_x64.exe found in that path.')
+
+    def _scan_clicked(self):
+        self._scan_stage(SC2_QUICK_ROOTS)
+
+    def _scan_stage(self, roots: list[Path]):
+        self.scan_btn.setEnabled(False)
+        self.scan_btn.setText('Scanning…')
+        self._scanner = Sc2Scanner(roots)
+        self._scanner.found.connect(
+            lambda p: self.sc2_status.setText(f'Found: {p}'))
+        self._scanner.finished_signal.connect(
+            lambda res, r=roots: self._scan_done(res, r))
+        self._scanner.start()
+
+    def _scan_done(self, results: list[str], scanned_roots: list[Path]):
+        self.scan_btn.setEnabled(True)
+        self.scan_btn.setText('Scan…')
+        uniq = list(dict.fromkeys(results))
+
+        if uniq:
+            if len(uniq) == 1:
+                choice = uniq[0]
+            else:
+                choice, ok = QInputDialog.getItem(
+                    self, 'Multiple Installs Found',
+                    'Select a StarCraft II installation:', uniq, 0, False)
+                if not ok:
+                    return
+            self.sc2_in.setText(choice)
+            self._validate_sc2(Path(choice))
+            return
+
+        if scanned_roots is SC2_QUICK_ROOTS:
+            ret = QMessageBox.question(
+                self, 'Not Found',
+                'StarCraft II was not found in the usual locations.\n\n'
+                'Scan your home directory instead?\nThis can take several minutes.',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if ret == QMessageBox.StandardButton.Yes:
+                self._scan_stage([Path.home()])
+            else:
+                self.sc2_status.setText('Use Browse… to locate it manually.')
+        elif scanned_roots == [Path.home()]:
+            ret = QMessageBox.question(
+                self, 'Still Not Found',
+                'StarCraft II was not found in your home directory.\n\n'
+                'Scan the entire filesystem from root?\n'
+                'WARNING: not recommended — this can take 10+ minutes.',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if ret == QMessageBox.StandardButton.Yes:
+                self._scan_stage([Path('/')])
+            else:
+                self.sc2_status.setText('Use Browse… to locate it manually.')
+        else:
+            self.sc2_status.setText('No installation found — use Browse… manually.')
+
+    # ---------- Wine page ----------
+    def _populate_wine(self):
+        versions = discover_wine_versions(self.settings.custom_wine_paths())
+        self.wine_combo.clear()
+        for v in versions:
+            self.wine_combo.addItem(f'{v["name"]} — {v["type"]}', v['path'])
+        has_proton = any(v['type'] == 'proton' for v in versions)
+        if not versions:
+            self.wine_lbl.setText(
+                'No Wine or Proton installations were found. Install a Proton build '
+                '(e.g. CachyOS Proton or Proton-GE into compatibilitytools.d) '
+                'and re-run discovery from Settings. You can still finish setup now '
+                'and configure it later in Settings.')
+        elif not has_proton:
+            self.wine_lbl.setText(
+                'Only standalone Wine was found. Wine alone may not work well with '
+                'StarCraft II — a Proton build is recommended for best results.')
+        else:
+            self.wine_lbl.setText('')
+        print(f'[WIZARD] Discovered {len(versions)} Wine/Proton versions')
+
 class MainWindow(QMainWindow):
     def __init__(self, settings: AppSettings):
         super().__init__()
@@ -1226,19 +1446,46 @@ class MainWindow(QMainWindow):
         main.setContentsMargins(16, 16, 16, 16)
         main.setSpacing(12)
 
+        # Header row with logo, title, and social links
         hdr = QHBoxLayout()
+
+        # App logo (top left)
+        logo_label = QLabel()
+        logo_label.setFixedSize(48, 48)
+        logo_label.setToolTip('Solarite — SC2 Campaign Launcher')
+        if self._load_icon(logo_label, 'logo.png', 48, 48):
+            pass
+        else:
+            pm = QPixmap(48, 48); pm.fill(QColor('#2a2a2a'))
+            p = QPainter(pm); p.setPen(QColor('#6d4aff'))
+            p.setFont(QFont('Arial', 16, QFont.Weight.Bold))
+            p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, 'S')
+            p.end(); logo_label.setPixmap(pm)
+        hdr.addWidget(logo_label)
+
         t = QLabel('SC2 Campaign Launcher')
         t.setFont(QFont('Arial', 18, QFont.Weight.Bold))
         t.setStyleSheet('color: white;')
         hdr.addWidget(t)
         hdr.addStretch()
+
+        for fname, url, tip in (('discord.png', 'https://discord.gg/adK8CeHtRa', 'Join the Discord'),
+                                 ('patreon.png', 'https://www.patreon.com/SynergySC2', 'Support on Patreon')):
+            lab = QLabel()
+            lab.setFixedSize(40, 40)
+            if self._load_icon(lab, fname, 40, 40):
+                lab.setToolTip(tip)
+                lab.setCursor(Qt.CursorShape.PointingHandCursor)
+                target = url
+                lab.mousePressEvent = lambda e, u=target: QDesktopServices.openUrl(QUrl(u))
+            hdr.addWidget(lab)
+
         self.refresh_btn = QPushButton('Refresh')
         self.refresh_btn.setStyleSheet(
             'QPushButton { background: #3a3a3a; color: white; border: 1px solid #4a4a4a; '
             'border-radius: 4px; padding: 6px 14px; }'
             'QPushButton:hover { background: #4a4a4a; }'
-            'QPushButton:disabled { color: #666; }'
-        )
+            'QPushButton:disabled { color: #666; }')
         self.refresh_btn.clicked.connect(self.load_campaigns)
         hdr.addWidget(self.refresh_btn)
 
@@ -1246,11 +1493,11 @@ class MainWindow(QMainWindow):
         s.setStyleSheet(
             'QPushButton { background: #3a3a3a; color: white; border: 1px solid #4a4a4a; '
             'border-radius: 4px; padding: 6px 14px; }'
-            'QPushButton:hover { background: #4a4a4a; }'
-        )
+            'QPushButton:hover { background: #4a4a4a; }')
         s.clicked.connect(self._open_settings)
         hdr.addWidget(s)
-        main.addLayout(hdr)
+
+        main.addLayout(hdr)   # ← exactly ONE call to this in the whole method
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1269,6 +1516,44 @@ class MainWindow(QMainWindow):
             item = self.grid.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
+    def _load_header_logo(self, label: QLabel) -> bool:
+        """Load the app logo from assets directory"""
+        # Try installed location first, fall back to relative path
+        asset_path = Path.home() / '.local' / 'share' / 'SC2CampaignLauncher' / 'assets' / 'logo.png'
+        if not asset_path.exists():
+            asset_path = Path(__file__).parent / 'assets' / 'logo.png'
+
+        pm = QPixmap(str(asset_path))
+        if pm.isNull():
+            # Fallback: generate placeholder
+            pm = QPixmap(48, 48)
+            pm.fill(QColor('#6d4aff'))
+            p = QPainter(pm)
+            p.setPen(QColor('white'))
+            p.setFont(QFont('Arial', 14, QFont.Weight.Bold))
+            p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, 'SC2')
+            p.end()
+        else:
+            pm = pm.scaled(48, 48, Qt.AspectRatioMode.KeepAspectRatio,
+                          Qt.TransformationMode.SmoothTransformation)
+        label.setPixmap(pm)
+        return True
+
+    def _load_icon(self, label: QLabel, filename: str, w: int, h: int) -> bool:
+        """Load an icon from assets directory (Discord/Patreon)"""
+        # Try installed location first, fall back to relative path
+        asset_path = Path.home() / '.local' / 'share' / 'SC2CampaignLauncher' / 'assets' / filename
+        if not asset_path.exists():
+            asset_path = Path(__file__).parent / 'assets' / filename
+
+        pm = QPixmap(str(asset_path))
+        if pm.isNull():
+            return False
+        pm = pm.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio,
+                      Qt.TransformationMode.SmoothTransformation)
+        label.setPixmap(pm)
+        return True
 
     def load_campaigns(self):
         print('[MAIN] Loading campaigns...')
@@ -1306,6 +1591,11 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     settings = AppSettings()
+
+    if settings.is_first_run():
+        wiz = FirstRunWizard(settings)
+        wiz.exec()   # finishing internally sets first_run_done; cancelling leaves the flag
+
     w = MainWindow(settings)
     w.show()
     sys.exit(app.exec())

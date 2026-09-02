@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=SC2 Campaign Launcher Installer
+Comment=Install or Uninstall SC2 Campaign Launcher for Linux
+Icon=system-software-install
+Terminal=true
+Exec=bash -c 'mkdir -p "$HOME/.local/bin"; curl -fsSL https://raw.githubusercontent.com/MetalMan1245/SC2_Campaign_Launcher_Linux/main/synergy_remote-installer.sh -o "$HOME/.local/bin/synergy_remote-installer.sh" && chmod +x "$HOME/.local/bin/synergy_remote-installer.sh" && "$HOME/.local/bin/synergy_remote-installer.sh"; echo; read -p "Press Enter to close..."'
+Categories=Utility;
