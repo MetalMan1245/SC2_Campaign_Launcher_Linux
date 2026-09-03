@@ -12,6 +12,8 @@ GLOBAL_SHARE='/usr/share'
 DEST_BIN=""
 DESKTOP_DIR=""
 ASSET_DEST=""
+SELF="$(readlink -f "$0")"
+UNINSTALL_PATH="$HOME/.local/bin/install-uninstall-SC2CLL.sh"
 
 # Detect installation state
 LOCAL_INSTALLED=0
@@ -29,7 +31,7 @@ check_install_state() {
     elif [[ $GLOBAL_INSTALLED -eq 1 ]]; then
         INSTALLED_SCOPE="global"
     else
-        INSTALLED_SCOPE="custom"
+        INSTALLED_SCOPE=""
     fi
 }
 
@@ -38,11 +40,13 @@ uninstall_local() {
     rm -fv "$LOCAL_SHARE/applications/sc2-campaign-launcher.desktop"
     rm -rfv "$LOCAL_SHARE/SC2CampaignLauncher"
     update-desktop-database "$LOCAL_SHARE/applications" 2>/dev/null || true
+    rm -fv "$UNINSTALL_PATH"   # last — while the running copy is fine, anything after would still work
+    rm -fv "$HOME/.local/share/icons/hicolor/48x48/apps/sc2-campaign-launcher.png"
     echo "Local uninstall complete."
 }
 
 uninstall_global() {
-    [[ $EUID -ne 0 ]] && { echo "Global uninstall requires root (sudo)."; return 1; }
+    [[ $EUID -ne 0 ]] && exec sudo "$SELF"
     rm -fv "$GLOBAL_BIN/$SCRIPT_NAME"
     rm -fv "$GLOBAL_SHARE/applications/sc2-campaign-launcher.desktop"
     rm -rfv "$GLOBAL_SHARE/SC2CampaignLauncher"
@@ -155,7 +159,14 @@ install_common() {
         cp "$ASSET_DEST/logo.png" "$ICON_DIR/sc2-campaign-launcher.png"
     fi
 
-    # ---- Write .desktop file ONCE (no duplicates) ----
+    # create_uninstall_method
+    mkdir -p "$HOME/.local/bin"
+    if [ "$(readlink -f "$UNINSTALL_PATH" 2>/dev/null || echo)" != "$SELF" ]; then
+        cp "$SELF" "$UNINSTALL_PATH"
+        chmod +x "$UNINSTALL_PATH"
+    fi
+
+    # ---- Write .desktop file ----
     DESKTOP_FILE="$DESKTOP_DIR/sc2-campaign-launcher.desktop"
     {
         echo '[Desktop Entry]'
@@ -170,6 +181,14 @@ install_common() {
         echo 'X-GNOME-Autostart-enabled=true'
         echo 'Categories=Game;'
         echo 'Keywords=StarCraft;SC2;Campaign;Launcher;'
+        echo 'Actions=uninstall;'
+        echo ''
+        echo '[Desktop Action uninstall]'
+        echo 'Name=Uninstall'
+        echo 'Name[en_US]=Uninstall'
+        echo "Exec=konsole -e $UNINSTALL_PATH"
+        echo 'Icon=edit-delete-remove'
+
     } > "$DESKTOP_FILE"
 
     # Record install scope in App.conf
@@ -191,10 +210,11 @@ PY
     fi
 
     echo "Installed successfully:"
-    echo "  Script  → $DEST_BIN/$SCRIPT_NAME"
-    echo "  Assets  → $ASSET_DEST"
-    echo "  Icon    → sc2-campaign-launcher (theme icon)"
-    echo "  Desktop → $DESKTOP_FILE"
+    echo "  Script      → $DEST_BIN/$SCRIPT_NAME"
+    echo "  Assets      → $ASSET_DEST"
+    echo "  Icon        → sc2-campaign-launcher (theme icon)"
+    echo "  Desktop     → $DESKTOP_FILE"
+    echo "  Uninstaller → $UNINSTALL_PATH"
     if [[ ":$PATH:" != *":$LOCAL_BIN:"* ]] && [[ "$DEST_BIN" == "$LOCAL_BIN" ]]; then
         echo "NOTE: $LOCAL_BIN is not in PATH — add it, or launch via the desktop entry."
     fi
