@@ -18,7 +18,12 @@ Support for moving campaigns when wine prefix is changed (or at least remove pre
 
 "Last updated" field in campaign details.
 
-Updater to install/uninstall script.
+Update UX to install/uninstall script (if run with the remote installer or the .desktop installer it already does this, but the interface is not clear about that).
+
+Remove or disable delete button from campaigns that are not currently installed.
+
+Integrate Naturalize with easy SC2 installation (undeveloped application, on the bucket list)
+https://github.com/MetalMan1245/naturalize
 
 # License
 
