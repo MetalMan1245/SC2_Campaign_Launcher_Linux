@@ -1,4 +1,7 @@
 # SC2_Campaign_Launcher_Linux
+
+<img src="img/Screenshot_20260904_224948.png" />
+
  Synergy's SC2 Campaign Launcher, completely rewritten for Linux
  
 While I do use this to manage Synergy's Campaigns on my personal computers, it is not well tested outside of CachyOS and my specific system (all dependencies already installed, etc.) so if you run into a problem, feel free to submit an Issue and I should be able to get that addressed!  Just provide what distro you're using and any other information that might be relevant.
@@ -15,6 +18,8 @@ Note that assets will not load correctly if you don't download the entire repo, 
 # Upcoming Features (roughly in order of importance)
 
 Support for moving campaigns when wine prefix is changed (or at least remove previous campaigns, launcher will still think campaigns are installed if Wine prefix is changed).
+
+Change filesystem hook to proper Dolphin interface (Localsend).
 
 "Last updated" field in campaign details.
 
