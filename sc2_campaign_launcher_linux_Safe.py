@@ -1475,8 +1475,19 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = settings
         self._fetcher = None
+
+        # Wayland window identification
         self.setWindowRole('SC2CampaignLauncher')
         self.setWindowTitle('SC2 Campaign Launcher')
+
+        # Also set window icon on the main window itself
+        from PyQt6.QtGui import QIcon
+        icon_path = self.settings.asset_dir() / 'logo.png'
+        if not icon_path.exists():
+            icon_path = Path(__file__).parent / 'assets' / 'logo.png'
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+
         self._setup_ui()
         self.load_campaigns()
 
@@ -1497,20 +1508,6 @@ class MainWindow(QMainWindow):
 
         # Header row with logo, title, and social links
         hdr = QHBoxLayout()
-
-        # App logo (top left)
-        logo_label = QLabel()
-        logo_label.setFixedSize(48, 48)
-        logo_label.setToolTip('Solarite — SC2 Campaign Launcher')
-        if self._load_icon(logo_label, 'logo.png', 48, 48):
-            pass
-        else:
-            pm = QPixmap(48, 48); pm.fill(QColor('#2a2a2a'))
-            p = QPainter(pm); p.setPen(QColor('#6d4aff'))
-            p.setFont(QFont('Arial', 16, QFont.Weight.Bold))
-            p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, 'S')
-            p.end(); logo_label.setPixmap(pm)
-        hdr.addWidget(logo_label)
 
         t = QLabel('SC2 Campaign Launcher')
         t.setFont(QFont('Arial', 18, QFont.Weight.Bold))

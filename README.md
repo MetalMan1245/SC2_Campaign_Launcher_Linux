@@ -6,7 +6,7 @@
  
 While I do use this to manage Synergy's Campaigns on my personal computers, it is not well tested outside of CachyOS and my specific system (all dependencies already installed, etc.) so if you run into a problem, feel free to submit an Issue and I should be able to get that addressed!  Just provide what distro you're using and any other information that might be relevant.
 
-# Manual Use
+# Manual Usage
 
 For the majority of users I recommend using the Release "Easy Installer" it's quick and painless.  If you want a manual "portable install"...
 
@@ -18,8 +18,6 @@ Note that assets will not load correctly if you don't download the entire repo, 
 # Upcoming Features (roughly in order of importance)
 
 Support for moving campaigns when wine prefix is changed (or at least remove previous campaigns, launcher will still think campaigns are installed if Wine prefix is changed).
-
-Change filesystem hook to proper Dolphin interface (Localsend).
 
 "Last updated" field in campaign details.
 

@@ -1642,6 +1642,7 @@ class MainWindow(QMainWindow):
             self.load_campaigns()
 
 def main():
+    os.environ.setdefault('QT_QPA_PLATFORMTHEME', 'xdgdesktopportal')
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
 
