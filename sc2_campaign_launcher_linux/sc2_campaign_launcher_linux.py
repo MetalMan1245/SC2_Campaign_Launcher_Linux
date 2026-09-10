@@ -17,6 +17,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings, QRect, QUrl
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont, QDesktopServices
 
+from platform_backend import get_backend
+backend = get_backend()
+
 GITHUB_REPO = 'R-P-S/SC2Campaigns'
 GITHUB_BRANCH = 'main'
 MAPS_JSON_URL = f'https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/maps.json'
