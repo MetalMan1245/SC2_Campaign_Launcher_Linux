@@ -1256,6 +1256,9 @@ class FirstRunWizard(QDialog):
         self.stack = QStackedWidget()
         lay.addWidget(self.stack)
 
+        # Last page depends on backend (Windows has no Wine/Proton step)
+        self._last_page = 1 if backend.needs_runner_selection else 0
+
         # --- Page 1: SC2 ---
         p1 = QWidget(); v1 = QVBoxLayout(p1)
         v1.addWidget(QLabel(f'<b>Step 1 of {self._last_page + 1} — Locate StarCraft II</b>'))
@@ -1274,9 +1277,6 @@ class FirstRunWizard(QDialog):
         v1.addWidget(self.sc2_status)
         v1.addStretch()
         self.stack.addWidget(p1)
-
-        # Last page depends on backend (Windows has no Wine/Proton step)
-        self._last_page = 1 if backend.needs_runner_selection else 0
 
         # --- Page 2: Wine/Proton (Linux only) ---
         if backend.needs_runner_selection:
@@ -1333,6 +1333,7 @@ class FirstRunWizard(QDialog):
 
     def _finish(self):
         root = self.sc2_in.text().strip()
+        data = None
         if root:
             self.settings.set_sc2_root(Path(root))
         if backend.needs_runner_selection:
