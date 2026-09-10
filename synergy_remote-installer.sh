@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RELEASE_REF="${SC2CL_REF:-v1.2.0}"
-if [[ ! "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ && ! "$RELEASE_REF" =~ ^[0-9a-f]{40}$ ]]; then
-    echo 'SC2CL_REF must be a release tag or a full commit ID.' >&2
-    exit 1
-fi
+# Pinned-release mode (kept for reference — restore if we ever go back to
+# release-tagged installs; requires publishing a tag for every change):
+# if [[ ! "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ && ! "$RELEASE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+#     echo 'SC2CL_REF must be a release tag or a full commit ID.' >&2
+#     exit 1
+# fi
+
+# Pull the tip of the default branch directly; SC2CL_REF can override with a
+# branch name, tag, or commit SHA (e.g. for testing feature branches).
+RELEASE_REF="${SC2CL_REF:-main}"
 for dependency in curl unzip mktemp; do
     if ! command -v "$dependency" >/dev/null; then
         echo "Install $dependency before running the remote installer." >&2
