@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -48,11 +49,18 @@ def desktop_argument(value):
     return '"' + escaped.replace('\\', '\\\\').replace('%', '%%') + '"'
 
 
-def desktop_entry(name, args, icon, terminal=False):
-    return ('[Desktop Entry]\nType=Application\n'
+def desktop_entry(name, args, icon, terminal=False, uninstall=None, hidden=False):
+    text = ('[Desktop Entry]\nType=Application\n'
             f'Name={name}\nExec={" ".join(desktop_argument(str(arg)) for arg in args)}\n'
             f'Icon={icon}\nTerminal={str(terminal).lower()}\nCategories=Game;\n'
-            'Keywords=StarCraft;SC2;Campaign;Launcher;\n').encode('utf-8')
+            'Keywords=StarCraft;SC2;Campaign;Launcher;\n')
+    if hidden:
+        text += 'NoDisplay=true\n'
+    if uninstall:
+        text += ('Actions=uninstall;\n\n[Desktop Action uninstall]\nName=Uninstall\n'
+                 f'Exec={" ".join(desktop_argument(str(arg)) for arg in uninstall)}\n'
+                 'Icon=edit-delete-remove\n')
+    return text.encode('utf-8')
 
 
 class Installer:
@@ -120,7 +128,7 @@ class Installer:
         assets = source / 'assets'
         if not (package / 'sc2_campaign_launcher_linux.py').is_file() or not (assets / 'logo.png').is_file():
             raise ValueError('The source checkout is incomplete.')
-        python = Path(python or sys.executable).resolve()
+        python = Path(python or sys.executable).expanduser().absolute()
         if not python.is_file():
             raise ValueError('The selected Python executable does not exist.')
         original = self.installations().get(scope, {'directory': str(target), 'files': {}, 'external': {}})
@@ -164,10 +172,11 @@ class Installer:
         entries = {
             f'applications/{desktop_name}.desktop': desktop_entry(
                 'SC2 Campaign Launcher' + (' (custom)' if scope == 'custom' else ''),
-                ['env', f'SC2CL_DESKTOP_FILE={desktop_name}', python, '-B', entrypoint], icon),
+                ['env', f'SC2CL_DESKTOP_FILE={desktop_name}', python, '-B', entrypoint], icon,
+                uninstall=[python, '-B', uninstall, '--uninstall', scope, '--gui']),
             f'applications/{desktop_name}-uninstall.desktop': desktop_entry(
                 f'Uninstall SC2 Campaign Launcher ({scope})',
-                [python, '-B', uninstall, '--uninstall', scope], 'system-software-install', True),
+                [python, '-B', uninstall, '--uninstall', scope], 'system-software-install', True, hidden=True),
             f'icons/hicolor/48x48/apps/{icon}.png': (assets / 'logo.png').read_bytes(),
         }
         for relative, data in entries.items():
@@ -240,8 +249,12 @@ class Installer:
                     failures.append(str(error))
 
         remove_files([key for key in record['files'] if key != '.installation.json' and key not in support])
-        for relative, entry in list(record['external'].items()):
-            if failures and relative.endswith('-uninstall.desktop'):
+        # Both desktop entries can invoke uninstall; keep them until the icon and app files are removed.
+        entries = sorted(record['external'].items(),
+                         key=lambda item: (item[0].endswith('.desktop'),
+                                           not item[0].endswith('-uninstall.desktop')))
+        for relative, entry in entries:
+            if failures and relative.endswith('.desktop'):
                 continue
             try:
                 path = contained_path(self.locations.data, relative)
@@ -284,42 +297,140 @@ class Installer:
         return paths
 
 
+def choose_action(installer, args):
+    installed = installer.installations()
+    if args.uninstall == 'auto':
+        scopes = list(installed)
+        if not scopes:
+            raise ValueError('No installation is recorded.')
+        if len(scopes) == 1:
+            args.uninstall = scopes[0]
+        else:
+            args.uninstall = choose('Remove which installation?', [('Local', 'local'), ('Custom', 'custom'),
+                                                                  ('Both', 'both')])
+        return
+    if args.install or args.uninstall:
+        return
+    print('SC2 Campaign Launcher')
+    for scope, record in installed.items():
+        print(f'{scope.title()} installation found at {record["directory"]}')
+    if not installed:
+        legacy = installer.legacy_paths()
+        for path in legacy:
+            print(f'Older installation found at {path}. Its files will be kept when upgrading.')
+        if len(legacy) == 1:
+            local = installer.locations.home / '.local/share/SC2CampaignLauncher'
+            args.install = 'local' if legacy[0] == local else 'custom'
+            if args.install == 'custom':
+                args.directory = legacy[0]
+            return
+        args.install = choose('Where would you like to install?', [('Local', 'local'), ('Custom', 'custom')])
+        return
+    options = [(f'Update {scope} installation', ('install', scope)) for scope in installed]
+    options += [(f'Uninstall {scope} installation', ('uninstall', scope)) for scope in installed]
+    if len(installed) == 2:
+        options.append(('Uninstall both', ('uninstall', 'both')))
+    else:
+        other = 'custom' if 'local' in installed else 'local'
+        options.append((f'Also install {other}', ('install', other)))
+    action, scope = choose('Choose an action:', options)
+    setattr(args, action, scope)
+
+
+def choose(prompt, options):
+    print(prompt)
+    for index, (label, _) in enumerate(options, 1):
+        print(f'{index}. {label}')
+    value = input(f'Choose [1-{len(options)}]: ').strip()
+    if not value.isdecimal() or not 1 <= int(value) <= len(options):
+        raise ValueError('Invalid selection.')
+    return options[int(value) - 1][1]
+
+
+def qt_available():
+    check = subprocess.run([sys.executable, '-c',
+                            'from PyQt6.QtWidgets import QApplication; '
+                            'from PyQt6.QtCore import PYQT_VERSION; assert PYQT_VERSION >= 0x060203'],
+                           capture_output=True, check=False)
+    return check.returncode == 0
+
+
+def dependency_command():
+    if sys.prefix != sys.base_prefix:
+        return []
+    try:
+        release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
+                       if '=' in line)
+    except OSError:
+        return []
+    distro = release.get('ID', '').strip('"\'')
+    if distro in ('arch', 'cachyos', 'endeavouros', 'manjaro', 'garuda'):
+        command = ['pacman', '-S', '--needed', 'python-pyqt6']
+    elif distro in ('debian', 'ubuntu', 'linuxmint', 'pop'):
+        command = ['apt-get', 'install', 'python3-pyqt6']
+    elif distro in ('fedora', 'nobara'):
+        command = ['dnf', 'install', 'python3-qt6']
+    else:
+        return []
+    return ['sudo', *command] if shutil.which(command[0]) and shutil.which('sudo') else []
+
+
+def ensure_dependencies():
+    if qt_available():
+        return
+    command = dependency_command()
+    if command:
+        answer = input(f'Install {command[-1]} using the package manager? [y/N]: ').strip().lower()
+        if answer == 'y':
+            subprocess.run(command, check=True)
+    if not qt_available():
+        raise ValueError('PyQt6 6.2.3 or newer could not be loaded in the selected Python environment. '
+                         'Install PyQt6 there, then run the installer again. '
+                         'See the virtual environment instructions in README.md.')
+
+
+def gui_uninstall(installer, scope):
+    from PyQt6.QtWidgets import QApplication, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    if QMessageBox.question(None, 'Uninstall SC2 Campaign Launcher',
+                            f'Remove the {scope} installation?\nCampaigns and settings will be kept.') != QMessageBox.StandardButton.Yes:
+        return
+    try:
+        kept = installer.uninstall(scope)
+    except (OSError, ValueError) as error:
+        QMessageBox.critical(None, 'Uninstall failed', str(error))
+        return
+    text = 'SC2 Campaign Launcher was uninstalled. Campaigns and settings were kept.'
+    if kept:
+        text += '\n\nKept changed or pre-existing files:\n' + '\n'.join(kept)
+    QMessageBox.information(None, 'Uninstall complete', text)
+    app.processEvents()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--install', choices=('local', 'custom'))
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument('--install', choices=('local', 'custom'))
     parser.add_argument('--directory', type=Path, help='Parent directory for a custom installation')
     parser.add_argument('--source', type=Path, default=Path(__file__).resolve().parent.parent)
-    parser.add_argument('--uninstall', choices=('local', 'custom', 'both'))
+    actions.add_argument('--uninstall', nargs='?', const='auto', choices=('auto', 'local', 'custom', 'both'))
     parser.add_argument('--yes', action='store_true', help='Skip the uninstall confirmation')
+    parser.add_argument('--gui', action='store_true', help='Show desktop uninstall dialogs')
     args = parser.parse_args()
     try:
         installer = Installer()
-        if not args.install and not args.uninstall:
-            print('SC2 Campaign Launcher')
-            for scope, record in installer.installations().items():
-                print(f'{scope}: {record["directory"]}')
-            for legacy in installer.legacy_paths():
-                print(f'Older installation found at {legacy}. Its files will be kept.')
-            print('1. Install or update local\n2. Install or update custom\n3. Uninstall')
-            choice = input('Choose [1-3]: ').strip()
-            if choice == '1':
-                args.install = 'local'
-            elif choice == '2':
-                args.install = 'custom'
-            elif choice == '3':
-                args.uninstall = input('Scope to remove [local/custom/both]: ').strip()
-            else:
-                return
+        if args.gui:
+            if args.uninstall not in ('local', 'custom'):
+                raise ValueError('A desktop uninstall must name the local or custom installation.')
+            gui_uninstall(installer, args.uninstall)
+            return
+        choose_action(installer, args)
         if args.install:
-            check = subprocess.run([sys.executable, '-c',
-                                    'from PyQt6.QtWidgets import QApplication; '
-                                    'from PyQt6.QtCore import PYQT_VERSION; assert PYQT_VERSION >= 0x060203'],
-                                   capture_output=True, check=False)
-            if check.returncode:
-                raise ValueError('PyQt6 6.2.3 or newer could not be loaded. Run install-uninstall-SC2CLL.sh --install local '
-                                 'or install PyQt6 in your Python environment first.')
+            ensure_dependencies()
             if args.install == 'custom' and args.directory is None:
-                args.directory = Path(input(f'Parent directory (the app will use a {APP} subdirectory): ').strip())
+                existing = installer.installations().get('custom')
+                args.directory = (Path(existing['directory']).parent if existing else
+                                  Path(input(f'Parent directory (the app will use a {APP} subdirectory): ').strip()))
             target = installer.install(args.source, args.install, args.directory)
             print(f'Installed at {target}')
         elif args.uninstall:
@@ -332,7 +443,7 @@ def main():
                 if kept:
                     print('Kept pre-existing or changed files:\n' + '\n'.join(kept))
             print('Campaigns, settings, and download records were kept.')
-    except (OSError, ValueError, EOFError) as error:
+    except (OSError, ValueError, EOFError, subprocess.CalledProcessError) as error:
         print(f'Error: {error}', file=sys.stderr)
         raise SystemExit(1) from error
 

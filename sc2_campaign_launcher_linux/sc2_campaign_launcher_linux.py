@@ -5,6 +5,7 @@ import argparse
 import logging
 import os
 import sys
+from html import escape
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -12,12 +13,12 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     __package__ = 'sc2_campaign_launcher_linux'
 
-from PyQt6.QtCore import QEvent, QEventLoop, QLockFile, Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QImageReader, QPalette, QPixmap
+from PyQt6.QtCore import QEvent, QEventLoop, QLockFile, QSize, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QFont, QIcon, QImageReader, QPalette, QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
     QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from . import __version__
@@ -52,7 +53,7 @@ def plain_html(text):
     return ''.join(parser.parts).strip()
 
 
-def show_details(parent, title, text):
+def show_details(parent, title, text, repair=False):
     dialog = QDialog(parent)
     dialog.setWindowTitle(title)
     dialog.resize(620, 400)
@@ -67,9 +68,13 @@ def show_details(parent, title, text):
     close.clicked.connect(dialog.accept)
     buttons.addWidget(copy)
     buttons.addStretch()
+    if repair:
+        retry = QPushButton('Verify / repair')
+        retry.clicked.connect(lambda: dialog.done(2))
+        buttons.addWidget(retry)
     buttons.addWidget(close)
     layout.addLayout(buttons)
-    dialog.exec()
+    return dialog.exec() == 2
 
 
 def scan_sc2(roots, cancel, progress):
@@ -92,6 +97,8 @@ def scan_sc2(roots, cancel, progress):
 
 
 class SettingsDialog(QDialog):
+    refresh_requested = pyqtSignal(bool)
+
     def __init__(self, settings: AppSettings, jobs: JobPool, parent=None, first_run=False):
         super().__init__(parent)
         self.settings, self.jobs = settings, jobs
@@ -101,7 +108,7 @@ class SettingsDialog(QDialog):
         self.closed = False
         self.custom = list(settings.custom_runners())
         self.setWindowTitle('Set up StarCraft II' if first_run else 'Settings')
-        self.resize(660, 420)
+        self.resize(660, 320)
         layout = QVBoxLayout(self)
         intro = QLabel('Choose the existing StarCraft II installation you use to play campaigns.')
         intro.setWordWrap(True)
@@ -155,6 +162,13 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.status)
         layout.addStretch()
         buttons = QHBoxLayout()
+        if not first_run:
+            self.refresh_btn = QPushButton('Refresh')
+            self.refresh_btn.clicked.connect(lambda: self._refresh(False))
+            self.verify_btn = QPushButton('Verify files')
+            self.verify_btn.clicked.connect(lambda: self._refresh(True))
+            buttons.addWidget(self.refresh_btn)
+            buttons.addWidget(self.verify_btn)
         buttons.addStretch()
         cancel = QPushButton('Cancel')
         cancel.clicked.connect(self.reject)
@@ -165,6 +179,10 @@ class SettingsDialog(QDialog):
         layout.addLayout(buttons)
         if settings.backend.needs_runner_selection:
             self._discover(settings.runner())
+
+    def _refresh(self, force):
+        self.refresh_requested.emit(force)
+        self.status.setText('Checking campaign files...' if force else 'Refreshing campaigns...')
 
     def _discover(self, selected=None):
         if self.discovery is not None:
@@ -295,72 +313,99 @@ class SettingsDialog(QDialog):
 class CampaignCard(QFrame):
     requested = pyqtSignal(str, str)
 
-    def __init__(self, campaign, parent=None):
+    def __init__(self, campaign, assets, parent=None):
         super().__init__(parent)
         self.campaign = campaign
         self.details = {}
         self.busy = False
         self.running = False
-        self.setFixedWidth(280)
-        self.setMinimumHeight(345)
-        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setFixedSize(280, 320)
+        self.setStyleSheet(
+            'CampaignCard { background: #2a2a2a; border-radius: 8px; border: 1px solid #3a3a3a; }'
+            'CampaignCard:hover { border: 1px solid #6d4aff; }')
         layout = QVBoxLayout(self)
-        self.cover = QLabel('Cover unavailable')
+        layout.setSpacing(8)
+        layout.setContentsMargins(12, 12, 12, 12)
+        self.cover = QLabel(campaign['name'][:30])
+        self.cover.setTextFormat(Qt.TextFormat.PlainText)
+        self.cover.setWordWrap(True)
         self.cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.cover.setFixedSize(256, 144)
-        self.cover.setStyleSheet('background: #181818; color: #aaa;')
-        layout.addWidget(self.cover)
+        self.cover.setStyleSheet('background: #1a1a1a; color: #666; border-radius: 4px;')
+        self.cover.setFont(QFont('Arial', 16, QFont.Weight.Bold))
+        layout.addWidget(self.cover, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self.remove = QPushButton(QIcon(str(assets / 'settings.png')), '', self.cover)
+        self.remove.move(4, 4)
+        self.remove.setAccessibleName('Remove campaign')
+        self.remove.clicked.connect(lambda: self._request('remove'))
+        self.info = QPushButton(QIcon(str(assets / 'info.png')), '', self.cover)
+        self.info.move(224, 4)
+        self.info.setAccessibleName('Campaign info')
+        self.info.clicked.connect(self._info)
+        for button in (self.remove, self.info):
+            button.setFixedSize(28, 28)
+            button.setIconSize(QSize(28, 28))
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet('QPushButton { border: none; background: transparent; padding: 0; }'
+                                'QPushButton:focus { border: 1px solid #6d4aff; }')
         self.title = QLabel()
         self.title.setTextFormat(Qt.TextFormat.PlainText)
         self.title.setWordWrap(True)
-        self.title.setMinimumHeight(36)
+        self.title.setFixedHeight(40)
+        self.title.setStyleSheet('color: white;')
         self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        font = self.title.font()
-        font.setBold(True)
-        self.title.setFont(font)
+        self.title.setFont(QFont('Arial', 12, QFont.Weight.Bold))
         layout.addWidget(self.title)
-        self.meta = QLabel()
-        self.meta.setTextFormat(Qt.TextFormat.PlainText)
-        self.meta.setWordWrap(True)
-        layout.addWidget(self.meta)
+        meta = QHBoxLayout()
+        self.author = QLabel()
+        self.version = QLabel()
+        for label in (self.author, self.version):
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setStyleSheet('color: #999; font-size: 11px;')
+        meta.addWidget(self.author)
+        meta.addStretch()
+        meta.addWidget(self.version)
+        layout.addLayout(meta)
         self.status = QLabel()
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
+        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status.setFixedHeight(23)
+        self.status.setStyleSheet('color: #999; font-size: 11px;')
         layout.addWidget(self.status)
-        self.progress = QProgressBar()
-        self.progress.hide()
-        layout.addWidget(self.progress)
         controls = QHBoxLayout()
+        controls.addStretch()
         self.play = QPushButton()
+        self.play.setFixedSize(100, 32)
         self.play.clicked.connect(self._primary)
-        self.repair = QPushButton('Verify / repair')
-        self.repair.clicked.connect(lambda: self._request('install'))
         controls.addWidget(self.play)
-        controls.addWidget(self.repair)
+        controls.addStretch()
         layout.addLayout(controls)
-        extras = QHBoxLayout()
-        info = QPushButton('Info')
-        info.clicked.connect(self._info)
-        self.remove = QPushButton('Remove')
-        self.remove.clicked.connect(lambda: self._request('remove'))
-        extras.addWidget(info)
-        extras.addStretch()
-        extras.addWidget(self.remove)
-        layout.addLayout(extras)
         self.update_campaign(campaign)
 
     def update_campaign(self, campaign):
         self.campaign = campaign
         self.title.setText(campaign['name'])
-        self.meta.setText(f'{self.details.get("author", campaign["author"])} | v{campaign["version"]}')
+        self.author.setText(f'Author: {self.details.get("author", campaign["author"])}')
+        self.version.setText(f'v{campaign["version"]}')
+        description = plain_html(self.details.get('description') or campaign.get('description', ''))
+        self.info.setToolTip('<p>' + escape(description).replace('\n', '<br>') + '</p>'
+                             if description else 'Campaign info')
         if not self.busy and not self.running:
             status = campaign.get('status', 'not_installed')
             self.play.setText({'installed': 'Play', 'update_available': 'Update',
                                'not_installed': 'Install', 'error': 'Retry'}.get(status, 'Install'))
-            self.status.setText(campaign.get('error') or status.replace('_', ' ').capitalize())
-            self.progress.hide()
-        self.remove.setEnabled(campaign.get('managed', False) and not self.busy and not self.running)
-        self.remove.setToolTip('Remove files downloaded by this launcher. Existing and edited files are kept.')
+            self.status.setText('Check campaign files' if campaign.get('error') else status.replace('_', ' ').title())
+            self.status.setToolTip(campaign.get('error', ''))
+            color, hover = {'installed': ('#27ae60', '#229954'),
+                            'update_available': ('#e67e22', '#d35400')}.get(status, ('#3498db', '#2980b9'))
+            self.play.setStyleSheet(
+                f'QPushButton {{ background: {color}; color: white; border: none; '
+                'border-radius: 4px; font-weight: bold; }'
+                f'QPushButton:hover {{ background: {hover}; }}'
+                'QPushButton:disabled { background: #3a3a3a; color: #999; }')
+        self.remove.setEnabled(campaign.get('removable', False) and not self.busy and not self.running)
+        self.remove.setToolTip('Remove campaign')
 
     def _request(self, action):
         self.requested.emit(self.campaign['slug'], action)
@@ -377,34 +422,27 @@ class CampaignCard(QFrame):
         self.busy = True
         self.play.setText('Cancel')
         self.play.setEnabled(True)
-        self.repair.setEnabled(False)
         self.remove.setEnabled(False)
         self.status.setText(text)
 
     def set_idle(self):
         self.busy = False
         self.play.setEnabled(not self.running)
-        self.repair.setEnabled(not self.running)
         self.update_campaign(self.campaign)
 
     def set_running(self, running):
         self.running = running
         self.play.setEnabled(not running and not self.busy)
-        self.repair.setEnabled(not running and not self.busy)
         self.update_campaign(self.campaign)
         if running:
             self.status.setText('Game runner started')
             self.play.setText('Running')
 
     def show_progress(self, data):
-        self.progress.show()
         total, received = data['total'], data['received']
-        self.progress.setRange(0, 100 if total else 0)
-        if total:
-            self.progress.setValue(min(100, int(received * 100 / total)))
-        self.status.setText(f'{data["name"]}\nFile {data["index"]}/{data["count"]}, '
-                            f'{received / 1024 / 1024:.1f} MB'
-                            + (f' / {total / 1024 / 1024:.1f} MB' if total else ''))
+        progress = f'{min(100, int(received * 100 / total))}%' if total else f'{received / 1024 / 1024:.1f} MB'
+        self.status.setText(f'File {data["index"]}/{data["count"]}: {progress}')
+        self.status.setToolTip(data['name'])
 
     def set_media(self, details, data):
         self.details = details
@@ -445,21 +483,23 @@ class MainWindow(QMainWindow):
         self.pending_force = False
         self.generation = 0
         self.closing = False
+        self.operation_notice = ''
         self.jobs.idle.connect(self._jobs_idle)
         self.setWindowTitle('SC2 Campaign Launcher')
         self.setWindowRole('SC2CampaignLauncher')
-        self.setWindowIcon(QIcon(str(settings.asset_dir() / 'app.ico')))
-        self.resize(1240, 800)
+        self.setWindowIcon(QIcon(str(settings.asset_dir() / 'logo.png')))
+        self.resize(1300, 800)
         self.setMinimumSize(340, 420)
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        self.setStyleSheet('QMainWindow, QWidget { background: #1e1e1e; }')
         header = QHBoxLayout()
         title = QLabel('SC2 Campaign Launcher')
-        font = title.font()
-        font.setPointSize(16)
-        font.setBold(True)
-        title.setFont(font)
+        title.setFont(QFont('Arial', 18, QFont.Weight.Bold))
+        title.setStyleSheet('color: white;')
         title.setWordWrap(True)
         header.addWidget(title, 1)
         for text, asset, url in (
@@ -467,36 +507,41 @@ class MainWindow(QMainWindow):
             ('Patreon', 'patreon.png', 'https://www.patreon.com/SynergySC2'),
         ):
             button = QPushButton(QIcon(str(settings.asset_dir() / asset)), '')
+            button.setFixedSize(40, 40)
+            button.setIconSize(QSize(40, 40))
+            button.setStyleSheet('QPushButton { border: none; background: transparent; padding: 0; }'
+                                'QPushButton:focus { border: 1px solid #6d4aff; }')
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setToolTip(text)
             button.setAccessibleName(text)
             button.clicked.connect(lambda checked=False, link=url: QDesktopServices.openUrl(QUrl(link)))
             header.addWidget(button)
-        layout.addLayout(header)
-        actions = QHBoxLayout()
-        self.refresh_btn = QPushButton('Refresh')
-        self.refresh_btn.clicked.connect(lambda: self.load_campaigns())
-        self.verify_btn = QPushButton('Verify files')
-        self.verify_btn.clicked.connect(lambda: self.load_campaigns(force=True))
         self.settings_btn = QPushButton('Settings')
+        self.settings_btn.setStyleSheet(
+            'QPushButton { background: #3a3a3a; color: white; border: 1px solid #4a4a4a; '
+            'border-radius: 4px; padding: 6px 14px; }'
+            'QPushButton:hover { background: #4a4a4a; }')
         self.settings_btn.clicked.connect(self._open_settings)
-        actions.addWidget(self.refresh_btn)
-        actions.addWidget(self.verify_btn)
-        actions.addStretch()
-        actions.addWidget(self.settings_btn)
-        layout.addLayout(actions)
+        header.addWidget(self.settings_btn)
+        layout.addLayout(header)
         self.notice = QLabel('')
         self.notice.setWordWrap(True)
         self.notice.setTextFormat(Qt.TextFormat.PlainText)
+        self.notice.hide()
         layout.addWidget(self.notice)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet('QScrollArea { border: none; background: transparent; }')
         self.grid_widget = QWidget()
         self.grid = QGridLayout(self.grid_widget)
-        self.grid.setSpacing(12)
-        self.grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.grid.setSpacing(16)
+        self.grid.setContentsMargins(8, 8, 8, 8)
+        self.grid.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll.setWidget(self.grid_widget)
         layout.addWidget(self.scroll)
         self.scroll.viewport().installEventFilter(self)
+        self.settings_btn.setFocus()
         if autoload:
             self.load_campaigns()
 
@@ -511,7 +556,8 @@ class MainWindow(QMainWindow):
         generation = self.generation
         previous = list(self.campaigns)
         library = self.library
-        self.notice.setText('Checking campaign files...' if force else 'Loading campaigns...')
+        if not self.operation_notice:
+            self._set_notice('Checking campaign files...' if force else 'Loading campaigns...')
 
         def load(cancel, notify):
             result = self.catalog.load(cancel)
@@ -531,9 +577,9 @@ class MainWindow(QMainWindow):
         if generation == self.generation:
             if error:
                 if not isinstance(error, Cancelled):
-                    self.notice.setText(str(error))
+                    self._set_notice(str(error))
             else:
-                self.notice.setText(result.notice or f'{len(result.campaigns)} campaigns')
+                self._set_notice(result.notice or self.operation_notice)
                 self._render(result.campaigns, generation)
         if self.pending_refresh and self.mutation is None and not self.queue:
             force = self.pending_force
@@ -552,7 +598,7 @@ class MainWindow(QMainWindow):
         for campaign in campaigns:
             slug = campaign['slug']
             if slug not in self.cards:
-                card = self.cards[slug] = CampaignCard(campaign)
+                card = self.cards[slug] = CampaignCard(campaign, self.settings.asset_dir())
                 card.requested.connect(self._request)
             else:
                 self.cards[slug].update_campaign(campaign)
@@ -570,6 +616,7 @@ class MainWindow(QMainWindow):
     def _media(self, generation, slug, result, error):
         if not self.closing and generation == self.generation and slug in self.cards and not error:
             self.cards[slug].set_media(*result)
+            self._update_controls()
 
     def _layout_cards(self):
         while self.grid.count():
@@ -578,7 +625,7 @@ class MainWindow(QMainWindow):
         available = self.scroll.viewport().width() - margins.left() - margins.right()
         columns = max(1, (available + self.grid.spacing()) // (280 + self.grid.spacing()))
         for index, card in enumerate(self.cards.values()):
-            self.grid.addWidget(card, index // columns, index % columns)
+            self.grid.addWidget(card, index // columns, index % columns, Qt.AlignmentFlag.AlignHCenter)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -605,24 +652,26 @@ class MainWindow(QMainWindow):
             return
         if action == 'play':
             if self.mutation or self.queue:
-                self.notice.setText('Wait for file operations to finish before playing.')
+                self._set_notice('Wait for file operations to finish before playing.')
                 return
             try:
                 path = self.library.destination(campaign, campaign['maps'][0])
                 self.launcher.launch(slug, self.settings.launch_options(), path)
             except (OSError, ValueError) as error:
-                show_details(self, 'Launch failed', str(error))
+                self._launch_failed(slug, str(error))
             return
         if self.launcher.processes:
-            self.notice.setText('Close the game before installing or removing campaign files.')
+            self._set_notice('Close the game before installing or removing campaign files.')
             return
         if slug == self.mutation_slug or any(c['slug'] == slug for c, _ in self.queue):
             return
         if action == 'remove':
             if QMessageBox.question(self, 'Remove campaign',
-                                    f'Remove files downloaded for {campaign["name"]}?\n'
-                                    'Existing files, edited files, and shared mods still in use will be kept.') != QMessageBox.StandardButton.Yes:
+                                    f'Remove {campaign["name"]}?\n'
+                                    'Files matching a known campaign version will be removed.\n'
+                                    'Edited files, other files, and shared mods still in use will be kept.') != QMessageBox.StandardButton.Yes:
                 return
+        self.operation_notice = ''
         self.queue.append((campaign, action))
         self.cards[slug].set_busy('Queued')
         self._next_mutation()
@@ -662,11 +711,12 @@ class MainWindow(QMainWindow):
         self.cards[slug].set_idle()
         if error:
             if isinstance(error, Cancelled):
-                self.notice.setText('Operation cancelled. Completed files were kept.')
+                self.operation_notice = 'Operation cancelled. Completed files were kept.'
             else:
                 show_details(self, 'Campaign operation failed', str(error))
         else:
-            self.notice.setText(message)
+            self.operation_notice = message
+        self._set_notice(self.operation_notice)
         self._next_mutation()
 
     def _launch_changed(self, slug, state, message):
@@ -674,9 +724,9 @@ class MainWindow(QMainWindow):
             self.cards[slug].set_running(state == 'running')
         self._update_controls()
         if state == 'failed' and not self.closing:
-            show_details(self, 'Launch failed', message)
+            self._launch_failed(slug, message)
         elif state == 'running':
-            self.notice.setText('Game runner started. Closing this launcher will leave it running.')
+            self._set_notice('Game runner started. Closing this launcher will leave it running.')
 
     def _update_controls(self):
         changing = bool(self.mutation or self.queue)
@@ -688,11 +738,19 @@ class MainWindow(QMainWindow):
                 continue
             can_queue = card.campaign.get('status') != 'installed'
             card.play.setEnabled(not running and (not changing or can_queue) and not self.closing)
-            card.repair.setEnabled(not running and not self.closing)
-            card.remove.setEnabled(card.campaign.get('managed', False) and not running and not self.closing)
+            card.remove.setEnabled(card.campaign.get('removable', False) and not running and not self.closing)
+
+    def _set_notice(self, text):
+        self.notice.setText(text)
+        self.notice.setVisible(bool(text))
+
+    def _launch_failed(self, slug, message):
+        if show_details(self, 'Launch failed', message, repair=True) and slug in self.cards:
+            self._request(slug, 'install')
 
     def _open_settings(self):
         dialog = SettingsDialog(self.settings, self.jobs, self)
+        dialog.refresh_requested.connect(self.load_campaigns)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.generation += 1
             self.library = Library(self.settings.sc2_root(), self.settings.backend.data_dir())
@@ -709,7 +767,7 @@ class MainWindow(QMainWindow):
         self.queue.clear()
         if self.jobs.busy():
             self.jobs.cancel_all()
-            self.notice.setText('Finishing current operations...')
+            self._set_notice('Finishing current operations...')
             self._update_controls()
             event.ignore()
         else:
@@ -741,7 +799,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version', action='version', version=__version__)
     parser.add_argument('--smoke-test', action='store_true', help='Check the packaged UI and assets, then exit.')
+    parser.add_argument('--run-game', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.run_game:
+        from .game_process import run
+        raise SystemExit(run(args.run_game))
     app = QApplication(sys.argv[:1])
     app.setApplicationName('SC2CampaignLauncher')
     app.setOrganizationName('SC2CampaignLauncher')

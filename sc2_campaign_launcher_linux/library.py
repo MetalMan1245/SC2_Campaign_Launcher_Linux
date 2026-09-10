@@ -85,7 +85,7 @@ class Library:
             result = []
             for campaign in campaigns:
                 check_cancel(cancel)
-                status, error = 'installed', ''
+                status, error, present = 'installed', '', False
                 try:
                     files = campaign['maps'] + campaign['mods']
                     if not campaign['maps']:
@@ -93,6 +93,8 @@ class Library:
                     for file in files:
                         check_cancel(cancel)
                         path = self.destination(campaign, file)
+                        if file in campaign['maps'] and path.is_file():
+                            present = True
                         if not path.is_file():
                             status = 'not_installed'
                         elif not self._current(path, file['sha256'], cancel, force):
@@ -102,7 +104,8 @@ class Library:
                     status, error = 'error', str(failure)
                 managed = any(campaign['slug'] in f['campaigns']
                               for f in self.data['files'].values())
-                result.append({**campaign, 'status': status, 'error': error, 'managed': managed})
+                result.append({**campaign, 'status': status, 'error': error, 'managed': managed,
+                               'removable': managed or present})
             if not self.problem:
                 try:
                     self._save()
@@ -154,35 +157,44 @@ class Library:
     def remove(self, campaign: dict, catalog: list[dict], cancel: Event) -> str:
         with self.lock:
             self._require_installation()
+            campaign = parse_campaign(raw_campaign(campaign))
             slug = campaign['slug']
-            removed, kept = 0, 0
-            for key, record in list(self.data['files'].items()):
+            candidates = {file_key(campaign, file): {file['sha256']}
+                          for file in campaign['maps'] + campaign['mods']}
+            for key, record in self.data['files'].items():
+                if slug in record['campaigns']:
+                    candidates.setdefault(key, set()).add(record['sha256'])
+            removed, kept, shared_count = 0, 0, 0
+            for key, hashes in candidates.items():
                 check_cancel(cancel)
-                if slug not in record['campaigns']:
-                    continue
-                remaining = [s for s in record['campaigns'] if s != slug]
+                record = self.data['files'].get(key)
+                remaining = [s for s in record['campaigns'] if s != slug] if record else []
                 path = contained_path(self.root, key)
                 shared = bool(remaining)
                 if key.startswith('Mods/') and not shared:
                     shared = self._used_elsewhere(key, slug, catalog)
                 if not shared and path.exists():
-                    if (record['owned'] and path.is_file()
-                            and file_hash(path, cancel) == record['sha256']):
+                    if path.is_file() and file_hash(path, cancel) in hashes:
                         path.unlink()
+                        self.data['verified'].pop(str(path.relative_to(self.root)), None)
                         prune_empty(self.root, path.parent)
                         removed += 1
                     else:
                         kept += 1
-                if remaining or shared:
+                elif shared and path.exists():
+                    shared_count += 1
+                if record and (remaining or shared):
                     record['campaigns'] = remaining
-                else:
+                elif record:
                     del self.data['files'][key]
                 self._save()
             self.data['campaigns'].pop(slug, None)
             self._save()
             message = f'Removed {removed} file(s) from {campaign["name"]}.'
             if kept:
-                message += f' Kept {kept} pre-existing or modified file(s).'
+                message += f' Kept {kept} modified or unrecognized file(s).'
+            if shared_count:
+                message += f' Kept {shared_count} shared file(s) used by other campaigns.'
             return message
 
     def _used_elsewhere(self, key: str, slug: str, catalog: list[dict]) -> bool:

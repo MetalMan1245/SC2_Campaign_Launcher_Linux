@@ -104,13 +104,37 @@ def test_remove_preserves_unknown_nested_and_modified_files(library):
     assert 'Kept 1' in message
 
 
-def test_remove_never_adopts_preexisting_files(library):
+def test_remove_recognizes_verified_files_from_an_older_install(library):
     c = campaign()
     use_downloads(library)
     existing = write(library.destination(c, c['mods'][0]), b'current mod')
     library.install(c, Event())
     library.remove(c, [c], Event())
-    assert existing.read_bytes() == b'current mod'
+    assert not existing.exists()
+
+
+def test_remove_works_without_records_and_keeps_another_legacy_campaign(library):
+    a, b = campaign('A'), campaign('B')
+    for c in (a, b):
+        write(library.destination(c, c['maps'][0]), b'current map')
+    shared = write(library.destination(a, a['mods'][0]), b'current mod')
+    unknown = write(library.root / 'Maps/A/personal.SC2Map', b'personal')
+    status = library.statuses([a, b], Event())
+    assert all(c['removable'] and not c['managed'] for c in status)
+    library.remove(a, [a, b], Event())
+    assert not library.destination(a, a['maps'][0]).exists()
+    assert unknown.read_bytes() == b'personal'
+    assert shared.exists()
+    library.remove(b, [a, b], Event())
+    assert not shared.exists()
+
+
+def test_remove_keeps_edited_legacy_files(library):
+    c = campaign(mods=[])
+    path = write(library.destination(c, c['maps'][0]), b'personal edit')
+    assert library.statuses([c], Event())[0]['removable']
+    assert 'Kept 1' in library.remove(c, [c], Event())
+    assert path.read_bytes() == b'personal edit'
 
 
 def test_hash_mismatch_preserves_previous_file(library):

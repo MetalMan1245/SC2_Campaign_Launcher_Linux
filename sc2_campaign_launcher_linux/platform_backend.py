@@ -108,7 +108,8 @@ def validate_root(value: str) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute() or not is_sc2_root(path):
         raise ValueError('The directory must contain Support64/SC2Switcher_x64.exe.')
-    return path.resolve()
+    # Keep drive_c in the saved path when the game directory is a symlink.
+    return path
 
 
 def validate_prefix(value: str) -> Path:
@@ -121,6 +122,9 @@ def validate_prefix(value: str) -> Path:
 
 
 def windows_map_path(path: Path, prefix: Path) -> str:
+    logical_drive = prefix / 'drive_c'
+    if '..' not in path.parts and path.is_relative_to(logical_drive):
+        return 'C:\\' + str(path.relative_to(logical_drive)).replace('/', '\\')
     path = path.resolve()
     drive_c = (prefix / 'drive_c').resolve()
     if path.is_relative_to(drive_c):
@@ -172,7 +176,9 @@ class LinuxBackend:
         env = dict(os.environ)
         env['WINEPREFIX'] = str(prefix)
         switcher = str(root / 'Support64/SC2Switcher_x64.exe')
-        map_arg = windows_map_path(map_path, prefix)
+        # Retain the drive_c alias when the game directory links to another disk.
+        logical_map = root / map_path.resolve().relative_to(root.resolve())
+        map_arg = windows_map_path(logical_map, Path(options.prefix).expanduser())
         if options.runner == MANAGED_PROTON:
             runner = None
         else:

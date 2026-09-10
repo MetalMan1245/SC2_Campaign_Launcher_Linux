@@ -132,7 +132,11 @@ class PythonBackend:
 
 
 def test_refresh_and_window_close_leave_game_process_running(qapp, windows, settings, tmp_path):
-    launcher = LaunchManager(PythonBackend('import time; time.sleep(30)'), tmp_path / 'logs')
+    stop = tmp_path / 'stop'
+    script = ('import time\nfrom pathlib import Path\n'
+              f'deadline = time.monotonic() + 10\n'
+              f'while not Path({str(stop)!r}).exists() and time.monotonic() < deadline: time.sleep(.02)')
+    launcher = LaunchManager(PythonBackend(script), tmp_path / 'logs')
     window = windows(launcher=launcher)
     spin(qapp, lambda: not window.jobs.busy())
     c = window.cards['Test'].campaign
@@ -147,13 +151,13 @@ def test_refresh_and_window_close_leave_game_process_running(qapp, windows, sett
         qapp.processEvents()
         assert process.poll() is None
     finally:
-        process.terminate()
+        stop.touch()
         process.wait(timeout=5)
 
 
 def test_early_runner_failure_is_reported(qapp, windows, settings, tmp_path, monkeypatch):
     errors = []
-    monkeypatch.setattr(ui, 'show_details', lambda parent, title, text: errors.append(text))
+    monkeypatch.setattr(ui, 'show_details', lambda parent, title, text, **kwargs: errors.append(text))
     launcher = LaunchManager(PythonBackend('print("runner error"); raise SystemExit(7)'), tmp_path / 'logs')
     window = windows(launcher=launcher)
     spin(qapp, lambda: not window.jobs.busy())
@@ -265,3 +269,136 @@ def test_mutations_are_serial_and_queued_work_can_be_cancelled(qapp, windows, mo
         gate.set()
     spin(qapp, lambda: window.mutation is None and not window.jobs.busy())
     assert calls == ['A', 'C']
+
+
+
+def test_original_card_controls_and_summary_tooltip(qapp, windows):
+    window = windows(autoload=False)
+    c = {**campaign(), 'status': 'installed', 'removable': True}
+    window._render([c], window.generation)
+    card = window.cards['Test']
+    card.set_media({'description': '<b>Campaign summary</b>', 'patch notes': 'Private patch notes'}, b'')
+    assert card.size().width() == 280 and card.size().height() == 320
+    assert card.remove.parent() is card.cover and card.remove.pos().x() == 4
+    assert card.info.parent() is card.cover and card.info.pos().x() == 224
+    assert card.remove.isEnabled()
+    assert 'Campaign summary' in card.info.toolTip()
+    assert 'Private patch notes' not in card.info.toolTip()
+    buttons = [button.text() for button in card.findChildren(ui.QPushButton) if button.text()]
+    assert buttons == ['Play']
+    assert not hasattr(window, 'refresh_btn') and not hasattr(window, 'verify_btn')
+
+
+def test_settings_contains_refresh_and_verification(qapp, settings):
+    dialog = ui.SettingsDialog(settings, JobPool())
+    actions = []
+    dialog.refresh_requested.connect(actions.append)
+    dialog.refresh_btn.click()
+    dialog.verify_btn.click()
+    assert actions == [False, True]
+    dialog.reject()
+
+
+def test_legacy_remove_button_works_and_keeps_the_result_visible(qapp, windows, monkeypatch):
+    from threading import Event
+    window = windows(autoload=False)
+    c = campaign(mods=[])
+    map_path = write(window.library.destination(c, c['maps'][0]), b'current map')
+    window._render(window.library.statuses([c], Event()), window.generation)
+    monkeypatch.setattr(ui.QMessageBox, 'question', lambda *a: ui.QMessageBox.StandardButton.Yes)
+    window.cards['Test'].remove.click()
+    spin(qapp, lambda: not window.jobs.busy() and window.mutation is None)
+    assert not map_path.exists()
+    assert not window.cards['Test'].remove.isEnabled()
+    assert window.cards['Test'].play.text() == 'Install'
+    assert 'Removed 1' in window.notice.text()
+
+
+def test_repair_is_offered_after_a_failed_launch(qapp, windows, monkeypatch):
+    window = windows(autoload=False)
+    window._render([campaign(mods=[])], window.generation)
+    prompts, requests = [], []
+    monkeypatch.setattr(ui, 'show_details', lambda *a, **kw: prompts.append(kw) or True)
+    monkeypatch.setattr(window, '_request', lambda *a: requests.append(a))
+    window._launch_changed('Test', 'failed', 'Missing launcher map')
+    assert prompts == [{'repair': True}]
+    assert requests == [('Test', 'install')]
+
+
+def test_saved_symlink_path_keeps_its_detected_prefix(qapp, settings, tmp_path, monkeypatch):
+    root = tmp_path / 'external/StarCraft II'
+    write(root / 'Support64/SC2Switcher_x64.exe', b'switcher')
+    prefix = tmp_path / 'wine'
+    alias = prefix / 'drive_c/StarCraft II'
+    alias.parent.mkdir(parents=True)
+    try:
+        alias.symlink_to(root, target_is_directory=True)
+    except OSError:
+        pytest.skip('Symbolic links require privileges on this system')
+    settings.backend = LinuxBackend()
+    monkeypatch.setattr(ui, 'discover_runners', lambda _: [{'name': 'UMU', 'path': MANAGED_PROTON, 'type': 'proton'}])
+    pool = JobPool()
+    dialog = ui.SettingsDialog(settings, pool)
+    spin(qapp, lambda: not pool.busy())
+    dialog.auto_prefix.setChecked(True)
+    dialog.sc2_in.setText(str(alias))
+    dialog._save()
+    assert dialog.result() == ui.QDialog.DialogCode.Accepted
+    assert settings.sc2_root() == alias
+    assert settings.wine_prefix() == str(prefix)
+    if os.name != 'nt':
+        wine = write(tmp_path / 'wine-runner/wine', b'#!/bin/sh\nexit 0\n')
+        wine.chmod(0o755)
+        map_path = write(root / 'Maps/Test/Launcher.SC2Map', b'current map')
+        command, env = settings.backend.command(LaunchOptions(alias, str(wine), str(prefix)), map_path)
+        assert command[-1] == 'C:\\StarCraft II\\Maps\\Test\\Launcher.SC2Map'
+        assert env['WINEPREFIX'] == str(prefix)
+
+
+def test_game_logs_and_file_protection_survive_launcher_exit(qapp, windows, settings, tmp_path):
+    import subprocess
+    from sc2_campaign_launcher_linux.game_process import MAX_LOG
+    stop, ready = tmp_path / 'stop', tmp_path / 'ready'
+    child = ('import sys, time\nfrom pathlib import Path\n'
+             'sys.stdout.buffer.write(b"x" * (3 * 1024 * 1024)); sys.stdout.flush()\n'
+             f'Path({str(ready)!r}).touch()\n'
+             'deadline = time.monotonic() + 15\n'
+             f'while not Path({str(stop)!r}).exists() and time.monotonic() < deadline: time.sleep(.02)')
+    root, logs = settings.sc2_root(), tmp_path / 'logs'
+    map_path = write(root / 'Maps/Test/Launcher.SC2Map', b'current map')
+    parent = ('import os, sys\nfrom pathlib import Path\n'
+              'from PyQt6.QtCore import QCoreApplication\n'
+              'from sc2_campaign_launcher_linux.launching import LaunchManager\n'
+              'from sc2_campaign_launcher_linux.platform_backend import LaunchOptions\n'
+              'class Backend:\n'
+              f'    def command(self, options, path): return [sys.executable, "-c", {child!r}], dict(os.environ)\n'
+              'app = QCoreApplication([])\n'
+              f'manager = LaunchManager(Backend(), Path({str(logs)!r}))\n'
+              f'manager.launch("Test", LaunchOptions(Path({str(root)!r})), Path({str(map_path)!r}))\n')
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path))
+    try:
+        subprocess.run([sys.executable, '-c', parent], env=env, check=True, capture_output=True, timeout=10)
+        spin(qapp, ready.exists)
+        log = next(logs.glob('launch-*.log'))
+        assert 0 < log.stat().st_size <= MAX_LOG
+        manager = LaunchManager(PythonBackend(''), logs)
+        assert 'Test' in manager.processes
+        window = windows(launcher=manager)
+        spin(qapp, lambda: not window.jobs.busy())
+        assert not window.cards['Test'].play.isEnabled()
+        assert not window.cards['Test'].remove.isEnabled()
+        window._request('Test', 'install')
+        assert not window.queue and window.mutation is None
+        assert 'Close the game' in window.notice.text()
+    finally:
+        stop.touch()
+    spin(qapp, lambda: not manager.processes)
+    assert window.cards['Test'].play.isEnabled()
+
+
+def test_reused_process_id_does_not_block_a_new_launcher(qapp, tmp_path):
+    from sc2_campaign_launcher_linux.files import atomic_json
+    atomic_json(tmp_path / 'launch-old.process', {'id': 'old', 'slug': 'Test', 'pid': os.getpid(),
+                                                 'identity': 'a previous process'})
+    launcher = LaunchManager(PythonBackend(''), tmp_path)
+    assert not launcher.processes

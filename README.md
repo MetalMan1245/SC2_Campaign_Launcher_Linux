@@ -18,12 +18,16 @@ Requirements:
 From a complete source checkout, run:
 
 ```sh
-bash install-uninstall-SC2CLL.sh --install local
+bash install-uninstall-SC2CLL.sh
 ```
 
-The script offers to install the distribution's PyQt6 package when needed.
+The installer detects existing local and custom installations and offers the
+corresponding update and removal actions. On a new installation it asks where
+to install. It offers to install the distribution's PyQt6 package when needed.
 It does not install StarCraft II or create a new Wine prefix.
 The launcher appears in the application menu after installation.
+
+To select a local installation directly, use `--install local`.
 
 For a custom installation, choose a parent directory:
 
@@ -94,16 +98,17 @@ On Linux, select either a discovered Wine/Proton version or **UMU managed Proton
 UMU finds and downloads its managed Proton version when first used. A standalone
 Wine selection is launched directly through Wine.
 
-Prefix detection uses the `drive_c` directory in the SC2 path. If SC2 is on another
+Prefix detection uses the `drive_c` directory in the selected SC2 path, including
+paths where the game directory is a symlink. If SC2 is on another
 drive, turn off automatic detection and select its prefix. Maps outside `drive_c`
 need a matching drive mapping under the prefix's `dosdevices` directory. These
 can be configured with winecfg. The UMU executable can be selected explicitly
 when it is not available on the desktop session's PATH.
 
-**Refresh** checks the catalog and compares installed maps and mods with it.
-**Verify files** rehashes every listed file without using cached results.
-**Verify / repair** on a campaign checks and downloads any missing or changed
-files for that campaign. Downloads are queued, can be cancelled, and are verified
+In Settings, **Refresh** checks the catalog and compares installed maps and mods
+with it. **Verify files** rehashes every listed file without using cached results.
+After a failed launch, **Verify / repair** checks and downloads any missing or
+changed files for that campaign. Downloads are queued, can be cancelled, and are verified
 before replacing existing files. A cancelled installation keeps completed files
 so it can be resumed.
 
@@ -111,15 +116,18 @@ Maps go under `Maps/<campaign folder>` and shared mods go under `Mods` in the
 selected SC2 installation. Symlinks inside these managed paths are rejected.
 Each SC2 installation has separate download and ownership records.
 
-Remove deletes unchanged files downloaded by this launcher. Files that existed
-before the launcher first recorded them, modified files, and unknown files are
-kept. Shared mods still needed by another known campaign are kept too. Campaigns
-installed with older versions can still be played and repaired, but their
-pre-existing files are not silently adopted for deletion.
+The trash icon removes campaign files whose contents match the current catalog
+or a version recorded by the launcher. This also works for older installations
+without download records. Modified and unknown files are kept, along with shared
+mods still needed by another known campaign. The information icon shows campaign
+details; hovering over it shows the campaign summary.
 
 When the catalog is unavailable, the last valid catalog and recorded campaigns
 remain available. This does not change StarCraft II's own offline requirements.
 Closing the launcher leaves a started game process running.
+Reopening the launcher recognizes active game monitors and prevents campaign
+file changes until they finish. A separate monitor drains game output and keeps
+each game log within 1 MiB, including while the launcher is closed.
 
 ## Updating and removing the launcher
 
@@ -127,8 +135,9 @@ Run the installer from a new source checkout or release to update the applicatio
 It checks for local edits before replacing recorded application files. Move any
 edited files to a backup location before retrying an update.
 
-The application menu includes a separate uninstall entry for each installation.
-From a source checkout, these commands do the same thing:
+The launcher's desktop entry includes an **Uninstall** action with a confirmation
+dialog. From a source checkout, `--uninstall` detects the installed scope. To
+select a scope explicitly:
 
 ```sh
 bash install-uninstall-SC2CLL.sh --uninstall local
