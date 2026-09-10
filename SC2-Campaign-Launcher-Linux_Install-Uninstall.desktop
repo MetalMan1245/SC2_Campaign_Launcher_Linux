@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=SC2 Campaign Launcher Installer
-Exec="sh" "-c" "set -eu; command -v curl >/dev/null || { echo 'Install curl first.'; exit 1; }; task_dir=\\$(mktemp -d -t sc2-installer.XXXXXX); trap 'rm -rf -- \\"\\$task_dir\\"' EXIT; curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 60 https://raw.githubusercontent.com/MetalMan1245/SC2_Campaign_Launcher_Linux/v1.2.0/synergy_remote-installer.sh -o \\"\\$task_dir/install.sh\\"; bash \\"\\$task_dir/install.sh\\""
+Exec="sh" "-c" "set -eu; command -v curl >/dev/null || { echo 'Install curl first.'; echo; read _; exit 1; }; task_dir=\\$(mktemp -d -t sc2-installer.XXXXXX); trap 'rm -rf -- \\"\\$task_dir\\"' EXIT; curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 60 https://raw.githubusercontent.com/MetalMan1245/SC2_Campaign_Launcher_Linux/main/synergy_remote-installer.sh -o \\"\\$task_dir/install.sh\\"; bash \\"\\$task_dir/install.sh\\"; echo; echo 'Press Enter to close...'; read _"
 Icon=system-software-install
 Terminal=true
 Categories=Game;
