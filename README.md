@@ -17,11 +17,15 @@ Note that assets will not load correctly if you don't download the entire repo, 
 
 # Upcoming Features (roughly in order of importance)
 
+Support for addtional non-Synergy campaigns.
+
 Support for moving campaigns when wine prefix is changed (or at least remove previous campaigns, launcher will still think campaigns are installed if Wine prefix is changed).
 
 "Last updated" field in campaign details.
 
-Update UX to install/uninstall script (if run with the remote installer or the .desktop installer it already does this, but the interface is not clear about that).
+Toggle for sorting campaigns by traits other than alphabetical (last updated, author, z to a, number of maps, etc.)
+
+Linux "Update" UX to install/uninstall script (if run with the remote installer or the .desktop installer it already does this, but the interface is not clear about that).
 
 Remove or disable delete button from campaigns that are not currently installed.
 
