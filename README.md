@@ -1,5 +1,7 @@
 # SC2 Campaign Launcher
 
+<img src="img/Screenshot_20260904_224948.png" />
+
 Download and play the custom campaigns published in
 [R-P-S/SC2Campaigns](https://github.com/R-P-S/SC2Campaigns).
 The launcher runs on Linux with Wine or Proton, and on Windows.
