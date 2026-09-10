@@ -17,6 +17,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings, QRect, QUrl
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont, QDesktopServices
 
+from platform_backend import get_backend
+backend = get_backend()
+
 GITHUB_REPO = 'R-P-S/SC2Campaigns'
 GITHUB_BRANCH = 'main'
 MAPS_JSON_URL = f'https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/maps.json'
@@ -176,16 +179,8 @@ class Sc2Scanner(QThread):
                                if d.lower() not in SCAN_SKIP_DIRS]
         self.finished_signal.emit(list(results.values()))
 
-# Quick-scan locations (checked first, in order)
-SC2_QUICK_ROOTS = [
-    Path.home() / '.local' / 'share' / 'Steam' / 'steamapps' / 'common',
-    Path.home() / '.steam' / 'steam' / 'steamapps' / 'common',
-    Path.home() / '.local' / 'share' / 'Steam' / 'steamapps' / 'compatdata',
-    Path.home() / '.steam' / 'steam',
-    Path.home() / '.wine',
-    Path.home() / '.local' / 'share' / 'umu',
-    Path.home() / 'Games',
-]
+# Quick-scan locations (checked first, in order) — resolved by the platform backend
+SC2_QUICK_ROOTS = backend.sc2_quick_roots()
 
 class AppSettings:
     def __init__(self):
@@ -197,17 +192,6 @@ class AppSettings:
 
     def set_sc2_root(self, path: Path):
         self.settings.setValue('sc2_root', str(path))
-
-    def wine_prefix(self) -> str:
-        """Derive Wine prefix from SC2 root by stripping everything after drive_c"""
-        root_str = str(self.sc2_root())
-        if 'drive_c' in root_str:
-            # e.g. /home/f/.../drive_c/Program Files (x86)/StarCraft II → /home/f/...
-            drive_c_idx = root_str.index('drive_c')
-            return root_str[:drive_c_idx].rstrip('/')
-        # Fallback: try stored value
-        val = self.settings.value('wine_prefix', type=str)
-        return val if val else ''
 
     def proton_path(self) -> str:
         return self.settings.value('wine_binary',
@@ -408,13 +392,14 @@ class AppSettings:
 
     def asset_dir(self) -> Path:
         scope = self.install_scope()
-        if scope == 'global':
-            return Path('/usr/share/SC2CampaignLauncher/assets')
+        if scope == 'portable':
+            # Assets shipped next to the script (works for both platforms)
+            return Path(__file__).parent / 'assets'
         if scope == 'custom':
             custom = self.settings.value('custom_asset_dir', type=str)
-            if custom:
+            if custom and Path(custom).exists():
                 return Path(custom)
-        return Path.home() / '.local' / 'share' / 'SC2CampaignLauncher/assets'
+        return backend.data_dir() / 'assets'
 
 def http_get(url: str) -> bytes:
     """Simple HTTP GET with a proper User-Agent. Raises on error."""
@@ -714,7 +699,7 @@ class CampaignCard(QFrame):
         slug = self.campaign['slug']
 
         # Cache directory
-        cache_dir = Path.home() / '.cache' / 'SC2CampaignLauncher' / 'assets' / slug
+        cache_dir = backend.cache_dir() / 'assets' / slug
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         # First, check if we have cached images
@@ -868,23 +853,13 @@ class CampaignCard(QFrame):
             QMessageBox.warning(self, 'Download Failed', msg)
 
     def _launch(self):
-        wine_prefix = self.settings.wine_prefix()
         switcher = self.settings.sc2_switcher_path()
-        proton_path_raw = self.settings.proton_path()
-
-        # Strip trailing '/proton' if present
-        proton_path = proton_path_raw.rstrip('/')
-        if proton_path.endswith('/proton'):
-            proton_path = proton_path[:-7]
-
-        if not wine_prefix or not switcher or not proton_path:
+        if not switcher:
             QMessageBox.warning(self, 'Not Configured',
-                                'Set Wine prefix, Proton path, and SC2Switcher in Settings.')
+                                'Set the SC2 path in Settings.')
             return
 
-        # --- map selection: pick the first .SC2Map from the parsed campaign ---
-        # self.campaign['maps'] now contains ONLY .SC2Map entries (mods were
-        # split out by the parser), so the first entry is the launcher map.
+        # Pick the first .SC2Map (the launcher map) from the parsed campaign
         launcher_maps = [m for m in self.campaign['maps']
                          if m['name'].lower().endswith('.sc2map')]
         if not launcher_maps:
@@ -892,42 +867,23 @@ class CampaignCard(QFrame):
             return
         map_filename = launcher_maps[0]['name']
 
-        # Use the JSON 'folder' field for the directory name (canonical slug)
         folder = self.campaign.get('folder') or self.campaign['slug']
-        maps_dir = self.settings.sc2_root() / 'Maps' / folder
-        map_linux_path = maps_dir / map_filename
+        map_path = self.settings.sc2_root() / 'Maps' / folder / map_filename
 
-        if not map_linux_path.exists():
+        if not map_path.exists():
             QMessageBox.warning(self, 'Map Not Found',
-                                f'The map file does not exist:\n{map_linux_path}\n'
+                                f'The map file does not exist:\n{map_path}\n'
                                 'Please install this campaign first.')
             return
 
-        # Wine Z: drive maps to the Linux root
-        wine_map_path = 'Z:' + str(map_linux_path).replace('/', '\\')
-
-        from PyQt6.QtCore import QProcess, QProcessEnvironment
-
-        proc = QProcess(self)
-        proc.setProcessChannelMode(QProcess.ProcessChannelMode.ForwardedChannels)
-
-        env = QProcessEnvironment.systemEnvironment()
-        env.insert('WINEPREFIX', wine_prefix)
-        env.insert('PROTONPATH', proton_path)
-        env.insert('PROTON_VERB', 'run')
-        env.insert('GAMEID', 'umu-default')
-        proc.setProcessEnvironment(env)
-
         print(f'[LAUNCH] Campaign: {self.campaign["name"]}')
         print(f'[LAUNCH] Map file: {map_filename}')
-        print(f'[LAUNCH] Wine prefix: {wine_prefix}')
-        print(f'[LAUNCH] umu-run {switcher} -run {wine_map_path}')
+        print(f'[LAUNCH] Backend: {backend.name}')
 
-        proc.start('/usr/bin/umu-run', [switcher, '-run', wine_map_path])
-
+        proc = backend.launch_sc2(self.settings, map_path, self)
         if not proc.waitForStarted(10000):
             QMessageBox.critical(self, 'Launch Failed',
-                                 f'Could not start umu-run:\n{proc.errorString()}')
+                                 f'Could not start StarCraft II:\n{proc.errorString()}')
             return
 
         self.status_label.setText('Launching...')
@@ -1023,45 +979,47 @@ class SettingsDialog(QDialog):
         row.addWidget(b)
         lay.addLayout(row)
 
-        # Wine/Proton version dropdown (Heroic-style discovery)
-        row = QHBoxLayout()
-        row.addWidget(QLabel('Proton:'))
-        self.wine_combo = QComboBox()
-        self.wine_combo.setMinimumWidth(340)
-        row.addWidget(self.wine_combo, stretch=1)
-        r = QPushButton('Rescan')
-        r.clicked.connect(self._populate_wine_combo)
-        row.addWidget(r)
-        lay.addLayout(row)
+        # Wine/Proton version dropdown (Linux only)
+        if backend.needs_runner_selection:
+            row = QHBoxLayout()
+            row.addWidget(QLabel('Proton:'))
+            self.wine_combo = QComboBox()
+            self.wine_combo.setMinimumWidth(340)
+            row.addWidget(self.wine_combo, stretch=1)
+            r = QPushButton('Rescan')
+            r.clicked.connect(self._populate_wine_combo)
+            row.addWidget(r)
+            lay.addLayout(row)
 
-        self.wine_warn = QLabel('')
-        self.wine_warn.setStyleSheet('color: #e67e22; font-size: 11px;')
-        self.wine_warn.setWordWrap(True)
-        lay.addWidget(self.wine_warn)
+            self.wine_warn = QLabel('')
+            self.wine_warn.setStyleSheet('color: #e67e22; font-size: 11px;')
+            self.wine_warn.setWordWrap(True)
+            lay.addWidget(self.wine_warn)
 
-        self.wine_combo.currentIndexChanged.connect(self._wine_selected)
-        self._populate_wine_combo()
+            self.wine_combo.currentIndexChanged.connect(self._wine_selected)
+            self._populate_wine_combo()
 
-        # Auto-detected section
-        lay.addWidget(QLabel('<hr><b>Auto-detected:</b>'))
+        if backend.needs_prefix_settings:
+            # Auto-detected section
+            lay.addWidget(QLabel('<hr><b>Auto-detected:</b>'))
 
-        # Wine prefix (auto-detected by default, editable when checkbox unchecked)
-        row = QHBoxLayout()
-        row.addWidget(QLabel('Wine prefix:'))
-        self.prefix_in = QLineEdit(settings.wine_prefix())
-        self.prefix_in.setEnabled(not settings.use_auto_prefix())
-        b = QPushButton('Browse')
-        b.clicked.connect(self._b_pfx)
-        row.addWidget(self.prefix_in)
-        row.addWidget(b)
-        lay.addLayout(row)
+            # Wine prefix (auto-detected by default, editable when checkbox unchecked)
+            row = QHBoxLayout()
+            row.addWidget(QLabel('Wine prefix:'))
+            self.prefix_in = QLineEdit(settings.wine_prefix())
+            self.prefix_in.setEnabled(not settings.use_auto_prefix())
+            b = QPushButton('Browse')
+            b.clicked.connect(self._b_pfx)
+            row.addWidget(self.prefix_in)
+            row.addWidget(b)
+            lay.addLayout(row)
 
-        self.auto_prefix_check = QCheckBox('Auto-detect Wine prefix from SC2 Installation')
-        self.auto_prefix_check.setChecked(settings.use_auto_prefix())
-        self.auto_prefix_check.stateChanged.connect(self._toggle_auto_prefix)
-        lay.addWidget(self.auto_prefix_check)
+            self.auto_prefix_check = QCheckBox('Auto-detect Wine prefix from SC2 Installation')
+            self.auto_prefix_check.setChecked(settings.use_auto_prefix())
+            self.auto_prefix_check.stateChanged.connect(self._toggle_auto_prefix)
+            lay.addWidget(self.auto_prefix_check)
 
-        # Switcher path (read-only, below the prefix)
+        # Switcher path (read-only)
         self.switcher_label = QLabel(f'Switcher: {settings.sc2_switcher_path()}')
         self.switcher_label.setStyleSheet('color: #999; font-size: 11px;')
         self.switcher_label.setWordWrap(True)
@@ -1098,7 +1056,7 @@ class SettingsDialog(QDialog):
         lay.addLayout(btns)
 
     STAGE_HOME = Path.home()
-    STAGE_ROOT = Path('/')
+    STAGE_ROOT = Path('/') if backend.name == 'linux' else Path('C:/')
 
     def reject(self):
         if getattr(self, '_scanner', None) and self._scanner.isRunning():
@@ -1167,7 +1125,7 @@ class SettingsDialog(QDialog):
             'Use Browse\u2026 to locate it manually.')
 
     def _preview_paths(self, root_str: str):
-        if 'drive_c' in root_str:
+        if backend.needs_prefix_settings and 'drive_c' in root_str:
             drive_c_idx = root_str.index('drive_c')
             prefix = root_str[:drive_c_idx].rstrip('/')
             self.prefix_in.setText(prefix)
@@ -1272,17 +1230,17 @@ class SettingsDialog(QDialog):
 
     def _save(self):
         self.settings.set_sc2_root(Path(self.sc2_in.text()))
-        data = self.wine_combo.currentData()
-        if data and data != '__custom__':
-            self.settings.set_wine_binary(data)
 
-        # Save auto-prefix preference
-        use_auto = self.auto_prefix_check.isChecked()
-        self.settings.set_use_auto_prefix(use_auto)
+        if backend.needs_runner_selection:
+            data = self.wine_combo.currentData()
+            if data and data != '__custom__':
+                self.settings.set_wine_binary(data)
 
-        # Save manual prefix override only if not using auto-prefix
-        if not use_auto:
-            self.settings.set_wine_prefix_override(self.prefix_in.text())
+        if backend.needs_prefix_settings:
+            use_auto = self.auto_prefix_check.isChecked()
+            self.settings.set_use_auto_prefix(use_auto)
+            if not use_auto:
+                self.settings.set_wine_prefix_override(self.prefix_in.text())
 
         self.accept()
 
@@ -1298,9 +1256,12 @@ class FirstRunWizard(QDialog):
         self.stack = QStackedWidget()
         lay.addWidget(self.stack)
 
+        # Last page depends on backend (Windows has no Wine/Proton step)
+        self._last_page = 1 if backend.needs_runner_selection else 0
+
         # --- Page 1: SC2 ---
         p1 = QWidget(); v1 = QVBoxLayout(p1)
-        v1.addWidget(QLabel('<b>Step 1 of 2 — Locate StarCraft II</b>'))
+        v1.addWidget(QLabel(f'<b>Step 1 of {self._last_page + 1} — Locate StarCraft II</b>'))
         v1.addWidget(QLabel('Scan common locations, or browse manually.'))
         row = QHBoxLayout()
         self.sc2_in = QLineEdit(str(settings.sc2_root()))
@@ -1317,18 +1278,19 @@ class FirstRunWizard(QDialog):
         v1.addStretch()
         self.stack.addWidget(p1)
 
-        # --- Page 2: Wine/Proton ---
-        p2 = QWidget(); v2 = QVBoxLayout(p2)
-        v2.addWidget(QLabel('<b>Step 2 of 2 — Choose Wine/Proton version</b>'))
-        v2.addWidget(QLabel('Best available version is pre-selected.'))
-        self.wine_combo = QComboBox()
-        v2.addWidget(self.wine_combo)
-        self.wine_lbl = QLabel('')
-        self.wine_lbl.setStyleSheet('color: #e67e22; font-size: 11px;')
-        self.wine_lbl.setWordWrap(True)
-        v2.addWidget(self.wine_lbl)
-        v2.addStretch()
-        self.stack.addWidget(p2)
+        # --- Page 2: Wine/Proton (Linux only) ---
+        if backend.needs_runner_selection:
+            p2 = QWidget(); v2 = QVBoxLayout(p2)
+            v2.addWidget(QLabel('<b>Step 2 of 2 — Choose Wine/Proton version</b>'))
+            v2.addWidget(QLabel('Best available version is pre-selected.'))
+            self.wine_combo = QComboBox()
+            v2.addWidget(self.wine_combo)
+            self.wine_lbl = QLabel('')
+            self.wine_lbl.setStyleSheet('color: #e67e22; font-size: 11px;')
+            self.wine_lbl.setWordWrap(True)
+            v2.addWidget(self.wine_lbl)
+            v2.addStretch()
+            self.stack.addWidget(p2)
 
         # --- Nav ---
         nav = QHBoxLayout()
@@ -1344,15 +1306,15 @@ class FirstRunWizard(QDialog):
     def _to_page(self, idx: int):
         self.stack.setCurrentIndex(idx)
         self.back_btn.setVisible(idx > 0)
-        self.next_btn.setText('Finish' if idx == 1 else 'Next')
-        if idx == 1:
+        self.next_btn.setText('Finish' if idx == self._last_page else 'Next')
+        if backend.needs_runner_selection and idx == 1:
             self._populate_wine()
 
     def _back(self):
         self._to_page(0)
 
     def _next(self):
-        if self.stack.currentIndex() == 0:
+        if self.stack.currentIndex() < self._last_page:
             root = self.sc2_in.text().strip()
             if not root:
                 self.sc2_status.setText('Enter or scan for a path first.')
@@ -1371,11 +1333,13 @@ class FirstRunWizard(QDialog):
 
     def _finish(self):
         root = self.sc2_in.text().strip()
+        data = None
         if root:
             self.settings.set_sc2_root(Path(root))
-        data = self.wine_combo.currentData()
-        if data:
-            self.settings.set_wine_binary(data)
+        if backend.needs_runner_selection:
+            data = self.wine_combo.currentData()
+            if data:
+                self.settings.set_wine_binary(data)
         self.settings.set_first_run_done()
         print(f'[WIZARD] SC2 root: {root}; wine: {data}')
         self.accept()
@@ -1564,7 +1528,7 @@ class MainWindow(QMainWindow):
     def _load_header_logo(self, label: QLabel) -> bool:
         """Load the app logo from assets directory"""
         # Try installed location first, fall back to relative path
-        asset_path = Path.home() / '.local' / 'share' / 'SC2CampaignLauncher' / 'assets' / 'logo.png'
+        asset_path = backend.data_dir() / 'assets' / 'logo.png'
         if not asset_path.exists():
             asset_path = Path(__file__).parent / 'assets' / 'logo.png'
 
@@ -1587,7 +1551,7 @@ class MainWindow(QMainWindow):
     def _load_icon(self, label: QLabel, filename: str, w: int, h: int) -> bool:
         """Load an icon from assets directory (Discord/Patreon)"""
         # Try installed location first, fall back to relative path
-        asset_path = Path.home() / '.local' / 'share' / 'SC2CampaignLauncher' / 'assets' / filename
+        asset_path = backend.data_dir() / 'assets' / filename
         if not asset_path.exists():
             asset_path = Path(__file__).parent / 'assets' / filename
 
@@ -1642,6 +1606,8 @@ class MainWindow(QMainWindow):
             self.load_campaigns()
 
 def main():
+    if backend.name == 'linux':
+        os.environ.setdefault('QT_QPA_PLATFORMTHEME', 'xdgdesktopportal')
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
 

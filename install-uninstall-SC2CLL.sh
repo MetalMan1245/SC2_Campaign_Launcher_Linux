@@ -4,11 +4,13 @@
 set -euo pipefail
 
 SCRIPT_NAME='sc2_campaign_launcher_linux.py'
+APP_SRC_DIR='sc2_campaign_launcher_linux'          # package dir in the repo
 APP_TITLE='SC2 Campaign Launcher'
+APP_DEST=""                                         # set per-scope in install_*()
 LOCAL_BIN="$HOME/.local/bin"
 LOCAL_SHARE="$HOME/.local/share"
-GLOBAL_BIN='/usr/local/bin'
-GLOBAL_SHARE='/usr/share'
+STATE_DIR="$HOME/.config/SC2CampaignLauncher"
+STATE_FILE="$STATE_DIR/install_path"   # records the custom install location
 DEST_BIN=""
 DESKTOP_DIR=""
 ASSET_DEST=""
@@ -17,19 +19,21 @@ UNINSTALL_PATH="$HOME/.local/bin/install-uninstall-SC2CLL.sh"
 
 # Detect installation state
 LOCAL_INSTALLED=0
-GLOBAL_INSTALLED=0
-INSTALLED_SCOPE=""  # "local", "global", "both", or "custom"
+CUSTOM_INSTALLED=0
+INSTALLED_SCOPE=""  # "local", "custom", or "both"
 
 check_install_state() {
-    [[ -f "$LOCAL_BIN/$SCRIPT_NAME" ]] && LOCAL_INSTALLED=1
-    [[ -f "$GLOBAL_BIN/$SCRIPT_NAME" ]] && GLOBAL_INSTALLED=1
+    CUSTOM_PATH=""
+    [[ -f "$STATE_FILE" ]] && CUSTOM_PATH="$(head -n1 "$STATE_FILE")"
+    [[ -n "$CUSTOM_PATH" && -f "$CUSTOM_PATH/$SCRIPT_NAME" ]] && CUSTOM_INSTALLED=1
+    [[ -f "$LOCAL_SHARE/SC2CampaignLauncher/$SCRIPT_NAME" ]] && LOCAL_INSTALLED=1
 
-    if [[ $LOCAL_INSTALLED -eq 1 ]] && [[ $GLOBAL_INSTALLED -eq 1 ]]; then
+    if [[ $LOCAL_INSTALLED -eq 1 ]] && [[ $CUSTOM_INSTALLED -eq 1 ]]; then
         INSTALLED_SCOPE="both"
     elif [[ $LOCAL_INSTALLED -eq 1 ]]; then
         INSTALLED_SCOPE="local"
-    elif [[ $GLOBAL_INSTALLED -eq 1 ]]; then
-        INSTALLED_SCOPE="global"
+    elif [[ $CUSTOM_INSTALLED -eq 1 ]]; then
+        INSTALLED_SCOPE="custom"
     else
         INSTALLED_SCOPE=""
     fi
@@ -42,16 +46,22 @@ uninstall_local() {
     update-desktop-database "$LOCAL_SHARE/applications" 2>/dev/null || true
     rm -fv "$UNINSTALL_PATH"   # last — while the running copy is fine, anything after would still work
     rm -fv "$HOME/.local/share/icons/hicolor/48x48/apps/sc2-campaign-launcher.png"
+    rm -fv "$STATE_FILE"
     echo "Local uninstall complete."
 }
 
-uninstall_global() {
-    [[ $EUID -ne 0 ]] && exec sudo "$SELF"
-    rm -fv "$GLOBAL_BIN/$SCRIPT_NAME"
-    rm -fv "$GLOBAL_SHARE/applications/sc2-campaign-launcher.desktop"
-    rm -rfv "$GLOBAL_SHARE/SC2CampaignLauncher"
-    update-desktop-database "$GLOBAL_SHARE/applications" 2>/dev/null || true
-    echo "Global uninstall complete."
+uninstall_custom() {
+    local target="$(head -n1 "$STATE_FILE" 2>/dev/null || echo)"
+    if [[ -z "$target" || ! -f "$target/$SCRIPT_NAME" ]]; then
+        echo "Custom install path unknown or already removed — cleaning state file only."
+        rm -fv "$STATE_FILE"
+        return
+    fi
+    rm -rfv "$target"
+    rm -fv "$LOCAL_SHARE/applications/sc2-campaign-launcher-custom.desktop" 2>/dev/null
+    rm -fv "$STATE_FILE"
+    update-desktop-database "$LOCAL_SHARE/applications" 2>/dev/null || true
+    echo "Custom uninstall complete (removed $target)."
 }
 
 do_uninstall() {
@@ -59,19 +69,19 @@ do_uninstall() {
         local)
             uninstall_local
             ;;
-        global)
-            uninstall_global
+        custom)
+            uninstall_custom
             ;;
         both)
-            echo "Detected both local and global installations."
+            echo "Detected both local and custom installations."
             echo "What would you like to uninstall?"
             PS3="Select option [1-3]: "
-            options=("Local only" "Global only" "Both")
+            options=("Local only" "Custom only" "Both")
             select opt in "${options[@]}"; do
                 case $opt in
                     "Local only") uninstall_local ;;
-                    "Global only") uninstall_global ;;
-                    "Both") uninstall_local; uninstall_global ;;
+                    "Custom only") uninstall_custom ;;
+                    "Both") uninstall_local; uninstall_custom ;;
                     *) echo "Invalid selection"; return 1 ;;
                 esac
                 break
@@ -86,23 +96,44 @@ do_uninstall() {
 install_local() {
     DEST_BIN="$LOCAL_BIN"
     DESKTOP_DIR="$LOCAL_SHARE/applications"
-    ASSET_DEST="$LOCAL_SHARE/SC2CampaignLauncher/assets"
+    SHARE_DEST="$LOCAL_SHARE/SC2CampaignLauncher"
+    ASSET_DEST="$SHARE_DEST/assets"
+    APP_DEST="$SHARE_DEST"
     SCOPE="local"
     install_common
 }
 
-install_global() {
-    [[ $EUID -ne 0 ]] && { echo "Global install requires root (sudo)."; exit 1; }
-    DEST_BIN="$GLOBAL_BIN"
-    DESKTOP_DIR="$GLOBAL_SHARE/applications"
-    ASSET_DEST="$GLOBAL_SHARE/SC2CampaignLauncher/assets"
-    SCOPE="global"
+install_custom() {
+    read -rp "Install directory for app files (e.g. /opt/sc2cl or $HOME/apps/sc2cl): " USER_DIR
+    USER_DIR="${USER_DIR/#\~/$HOME}"
+    if [[ -z "$USER_DIR" ]]; then echo "No directory given."; exit 1; fi
+    if [[ -d "$USER_DIR" && -n "$(ls -A "$USER_DIR" 2>/dev/null)" ]]; then
+        read -rp "'$USER_DIR' is not empty — install into it anyway? [y/N] " yn
+        [[ $yn =~ ^[Yy] ]] || exit 1
+    fi
+    mkdir -p "$USER_DIR" || { echo "Cannot create $USER_DIR (permission denied?)"; exit 1; }
+
+    DEST_BIN="$LOCAL_BIN"
+    DESKTOP_DIR="$LOCAL_SHARE/applications"
+    APP_DEST="$USER_DIR"
+    ASSET_DEST="$APP_DEST/assets"
+    SCOPE="custom"
     install_common
+    # Persist for uninstall + record scope for the app
+    mkdir -p "$STATE_DIR"; echo "$USER_DIR" > "$STATE_FILE"
+    python3 - "$SCOPE" "$ASSET_DEST" <<'PY' 2>/dev/null || \
+    echo "NOTE: could not record scope in QSettings — set install_scope=custom in Settings if assets don't load."
+import sys
+from PyQt6.QtCore import QSettings
+QSettings('SC2CampaignLauncher', 'App').setValue('install_scope', sys.argv[1])
+QSettings('SC2CampaignLauncher', 'App').setValue('custom_asset_dir', sys.argv[2])
+PY
 }
 
 install_common() {
     # ---- Location checks ----
-    [[ -f "./$SCRIPT_NAME" ]] || { echo "ERROR: $SCRIPT_NAME not found in $(pwd) — run from the project directory."; exit 1; }
+    [[ -f "./$APP_SRC_DIR/$SCRIPT_NAME" ]] || { echo "ERROR: ./$APP_SRC_DIR/$SCRIPT_NAME not found in $(pwd) — run from the project directory."; exit 1; }
+    [[ -f "./$APP_SRC_DIR/platform_backend.py" ]] || { echo "ERROR: ./$APP_SRC_DIR/platform_backend.py missing — repo checkout is incomplete (use 'Download ZIP', not a partial copy)."; exit 1; }
     [[ -d ./assets ]] || echo "WARNING: ./assets not found — branding will be missing."
 
     # ---- Dependency detection & install ----
@@ -142,8 +173,8 @@ install_common() {
     fi
 
     # ---- File installation ----
-    mkdir -p "$DEST_BIN" "$DESKTOP_DIR" "$ASSET_DEST"
-    install -m 755 "./$SCRIPT_NAME" "$DEST_BIN/$SCRIPT_NAME"
+    mkdir -p "$DEST_BIN" "$DESKTOP_DIR" "$ASSET_DEST" "$APP_DEST"
+    install -m 755 "./$APP_SRC_DIR/$SCRIPT_NAME" "./$APP_SRC_DIR/platform_backend.py" "$APP_DEST/"
     [[ -d ./assets ]] && cp -r ./assets/. "$ASSET_DEST/"
 
     # ---- Icon installation (CRITICAL FIX: system icon theme directories) ----
@@ -167,13 +198,17 @@ install_common() {
     fi
 
     # ---- Write .desktop file ----
-    DESKTOP_FILE="$DESKTOP_DIR/sc2-campaign-launcher.desktop"
+    if [[ "$SCOPE" == "custom" ]]; then
+        DESKTOP_FILE="$DESKTOP_DIR/sc2-campaign-launcher-custom.desktop"
+    else
+        DESKTOP_FILE="$DESKTOP_DIR/sc2-campaign-launcher.desktop"
+    fi
     {
         echo '[Desktop Entry]'
         echo 'Type=Application'
         echo "Name=$APP_TITLE"
         echo 'Comment=Synergys Mod Launcher for Linux'
-        echo "Exec=env QT_QPA_PLATFORM=xcb $DEST_BIN/$SCRIPT_NAME"
+        echo "Exec=env QT_QPA_PLATFORM=xcb python3 $APP_DEST/$SCRIPT_NAME"
         echo 'Icon=sc2-campaign-launcher'
         echo 'Terminal=false'
         echo "StartupWMClass=SC2CampaignLauncher"
@@ -210,7 +245,7 @@ PY
     fi
 
     echo "Installed successfully:"
-    echo "  Script      → $DEST_BIN/$SCRIPT_NAME"
+    echo "  Script      → $APP_DEST/$SCRIPT_NAME"
     echo "  Assets      → $ASSET_DEST"
     echo "  Icon        → sc2-campaign-launcher (theme icon)"
     echo "  Desktop     → $DESKTOP_FILE"
@@ -232,59 +267,65 @@ case "$INSTALLED_SCOPE" in
         echo "No existing installation found."
         echo "Where would you like to install?"
         PS3="Select [1-2]: "
-        options=("Local (~/.local)" "Global (/usr)")
+        options=("Local (~/.local)  [recommended]" "Custom directory")
         select opt in "${options[@]}"; do
             case $opt in
-                "Local (~/.local)") install_local; break ;;
-                "Global (/usr)") install_global; break ;;
+                "Local (~/.local)  [recommended]") install_local; break ;;
+                "Custom directory") install_custom; break ;;
                 *) echo "Invalid selection" ;;
             esac
         done
         ;;
     local)
-        echo "Local installation detected ($LOCAL_BIN)."
+        echo "Local installation detected ($LOCAL_SHARE/SC2CampaignLauncher)."
         echo "Options:"
-        PS3="Select [1-2]: "
-        options=("Reinstall Local" "Uninstall")
+        PS3="Select [1-3]: "
+        options=("Reinstall Local" "Also Install Custom" "Uninstall")
         select opt in "${options[@]}"; do
             case $opt in
                 "Reinstall Local") install_local; break ;;
+                "Also Install Custom") install_custom; break ;;
                 "Uninstall") do_uninstall; break ;;
                 *) echo "Invalid selection" ;;
             esac
         done
         ;;
-    global)
-        echo "Global installation detected ($GLOBAL_BIN)."
+    custom)
+        echo "Custom installation detected ($(head -n1 "$STATE_FILE" 2>/dev/null))."
         echo "Options:"
-        PS3="Select [1-2]: "
-        options=("Reinstall Global" "Uninstall")
+        PS3="Select [1-3]: "
+        options=("Reinstall Custom" "Also Install Local" "Uninstall")
         select opt in "${options[@]}"; do
             case $opt in
-                "Reinstall Global") install_global; break ;;
+                "Reinstall Custom") install_custom; break ;;
+                "Also Install Local") install_local; break ;;
                 "Uninstall") do_uninstall; break ;;
                 *) echo "Invalid selection" ;;
             esac
         done
         ;;
     both)
-        echo "Both local and global installations detected!"
+        echo "Both local and custom installations detected!"
         echo "What would you like to do?"
         PS3="Select [1-2]: "
-        options=("Manage Existing Installations" "Install New Scope")
+        options=("Manage Existing Installations" "Reinstall a Scope")
         select opt in "${options[@]}"; do
             case $opt in
-                "Manage Existing Installations") do_uninstall ;;
-                "Install New Scope")
-                    # This shouldn't happen — if both exist, there's nowhere new to install
-                    echo "Nothing new to install — both scopes are occupied."
+                "Manage Existing Installations") do_uninstall; break ;;
+                "Reinstall a Scope")
+                    PS3="Which scope? [1-2]: "
+                    scopes=("Local" "Custom")
+                    select s in "${scopes[@]}"; do
+                        case $s in
+                            "Local") install_local; break ;;
+                            "Custom") install_custom; break ;;
+                            *) echo "Invalid selection" ;;
+                        esac
+                    done
+                    break
                     ;;
                 *) echo "Invalid selection" ;;
             esac
         done
         ;;
 esac
-
-echo
-echo "Done."
-exit 0
