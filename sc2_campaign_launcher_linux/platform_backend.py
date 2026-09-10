@@ -1,5 +1,6 @@
 # platform_backend.py
 import sys
+import os
 from pathlib import Path
 from PyQt6.QtCore import QProcess, QProcessEnvironment
 
@@ -74,6 +75,20 @@ class WindowsBackend:
         return proc
 
 _BACKENDS = {'linux': LinuxBackend, 'win32': WindowsBackend}
+
+
+def detect_platform() -> str:
+    """Auto-detect OS, with env override for testing (SC2CL_PLATFORM=win32)."""
+    override = os.environ.get('SC2CL_PLATFORM')
+    if override in _BACKENDS:
+        return override
+    return 'win32' if sys.platform == 'win32' else 'linux'
+
+
+def _strip_trailing_proton(path: str) -> str:
+    path = path.rstrip('/')
+    return path[:-len('/proton')] if path.endswith('/proton') else path
+
 
 def get_backend():
     return _BACKENDS[detect_platform()]()
