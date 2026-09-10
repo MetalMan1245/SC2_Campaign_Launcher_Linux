@@ -804,6 +804,8 @@ def main():
     if args.run_game:
         from .game_process import run
         raise SystemExit(run(args.run_game))
+    if sys.platform.startswith('linux'):
+        os.environ.setdefault('QT_QPA_PLATFORMTHEME', 'xdgdesktopportal')
     app = QApplication(sys.argv[:1])
     app.setApplicationName('SC2CampaignLauncher')
     app.setOrganizationName('SC2CampaignLauncher')
