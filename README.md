@@ -1,58 +1,225 @@
-# SC2_Campaign_Launcher_Linux
+# SC2 Campaign Launcher
 
-<img src="img/Screenshot_20260904_224948.png" />
+Download and play the custom campaigns published in
+[R-P-S/SC2Campaigns](https://github.com/R-P-S/SC2Campaigns).
+The launcher runs on Linux with Wine or Proton, and on Windows.
+StarCraft II must already be installed.
 
- Synergy's SC2 Campaign Launcher, completely rewritten for Linux
- 
-While I do use this to manage Synergy's Campaigns on my personal computers, it is not well tested outside of CachyOS and my specific system (all dependencies already installed, etc.) so if you run into a problem, feel free to submit an Issue and I should be able to get that addressed!  Just provide what distro you're using and any other information that might be relevant.
+## Linux installation
 
-# Manual Usage
+Requirements:
 
-For the majority of users I recommend using the Release "Easy Installer" it's quick and painless.  If you want a manual "portable install"...
+- Python 3.10 or newer
+- PyQt6 6.2.3 or newer
+- [UMU](https://github.com/Open-Wine-Components/umu-launcher#installing) for Proton,
+  or a working Wine installation
+- An existing Wine prefix with StarCraft II installed
 
-1: Install dependencies 'python PyQt6 umu-launcher optional: Proton'
-2: Launch script using python 'python3 /path/to/script.py
+From a complete source checkout, run:
 
-Note that assets will not load correctly if you don't download the entire repo, which is handled by the installer.
+```sh
+bash install-uninstall-SC2CLL.sh --install local
+```
 
-# Upcoming Features (roughly in order of importance)
+The script offers to install the distribution's PyQt6 package when needed.
+It does not install StarCraft II or create a new Wine prefix.
+The launcher appears in the application menu after installation.
 
-Support for addtional non-Synergy campaigns.
+For a custom installation, choose a parent directory:
 
-Support for moving campaigns when wine prefix is changed (or at least remove previous campaigns, launcher will still think campaigns are installed if Wine prefix is changed).
+```sh
+bash install-uninstall-SC2CLL.sh --install custom --directory "$HOME/Applications"
+```
 
-"Last updated" field in campaign details.
+This creates `$HOME/Applications/SC2CampaignLauncher`. The application directory
+must be empty on the first installation. Paths containing spaces are supported.
+Local and custom installations have separate records and menu entries.
 
-Toggle for sorting campaigns by traits other than alphabetical (last updated, author, z to a, number of maps, etc.)
+Release installers download a specific release tag. The desktop installer in
+this checkout targets `v1.2.0` and becomes usable after that tag is published.
+Until then, use the source installation above. For a specific reviewed commit:
 
-Linux "Update" UX to install/uninstall script (if run with the remote installer or the .desktop installer it already does this, but the interface is not clear about that).
+```sh
+SC2CL_REF=<full-commit-id> bash synergy_remote-installer.sh --install local
+```
 
-Remove or disable delete button from campaigns that are not currently installed.
+The remote installer requires curl and unzip. A release installer continues to
+install its named version; download a newer installer when updating.
 
-Integrate Naturalize with easy SC2 installation (undeveloped application, on the bucket list)
-https://github.com/MetalMan1245/naturalize
+## Run from source
 
-# License
+A virtual environment is useful when the distribution's PyQt6 package is older
+than the supported version:
 
-StarCraft II is © Blizzard Entertainment.
-I do not claim ownership of the any assets.
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install .
+sc2-campaign-launcher
+```
 
-# Notes
+To run the checkout directly in that environment:
 
-This is a vibe coded project, I do use it myself but be warned, I am not an extrmely skilled developer, I just wanted to see an easier version of this exist for Linux.
+```sh
+python -m sc2_campaign_launcher_linux
+```
 
-The oriinal SC2 Campaign Launcher that is Windows exclusive can be found here (no source code):
+The original script entry point also works:
 
-https://github.com/R-P-S/SC2CampaignLauncher
+```sh
+python sc2_campaign_launcher_linux/sc2_campaign_launcher_linux.py
+```
 
-The maps for the launcher are kept here:
+The complete checkout is required for its artwork. To install a menu entry using
+the virtual environment, set `SC2CL_PYTHON` to the absolute path of its Python
+executable when running `install-uninstall-SC2CLL.sh`. Keep that environment while
+the application is installed.
 
-https://github.com/R-P-S/SC2Campaigns
+## Windows
 
-I took inspiration from ZachZimm who originally ported the project to Linux, and he's been very helpful and supportive, this version is more complicated but worth a look since it's the original launcher by R-P-S:
+Download `SC2CampaignLauncher-Windows-x86_64.zip` from a release and extract the
+whole archive. Keep `_internal` beside `SC2CampaignLauncher.exe`. The executable
+depends on the Python and Qt files in that directory.
 
-https://github.com/ZachZimm/Synergy-Mod-Launcher-Linux
+Choose the StarCraft II directory on first launch. Wine and Proton settings are
+not used on Windows.
 
-I haven't used it myself but there is supposed to be a macOS version of the launcher, check it out if you're on macOS:
+## Setup and campaign files
 
-https://github.com/Swagdude7/SC2-Synergy-Launcher-Mac
+Select the directory containing `Support64/SC2Switcher_x64.exe`. The Scan button
+checks common Steam, Wine, UMU, and Bottles locations. Browse can select an
+installation elsewhere.
+
+On Linux, select either a discovered Wine/Proton version or **UMU managed Proton**.
+UMU finds and downloads its managed Proton version when first used. A standalone
+Wine selection is launched directly through Wine.
+
+Prefix detection uses the `drive_c` directory in the SC2 path. If SC2 is on another
+drive, turn off automatic detection and select its prefix. Maps outside `drive_c`
+need a matching drive mapping under the prefix's `dosdevices` directory. These
+can be configured with winecfg. The UMU executable can be selected explicitly
+when it is not available on the desktop session's PATH.
+
+**Refresh** checks the catalog and compares installed maps and mods with it.
+**Verify files** rehashes every listed file without using cached results.
+**Verify / repair** on a campaign checks and downloads any missing or changed
+files for that campaign. Downloads are queued, can be cancelled, and are verified
+before replacing existing files. A cancelled installation keeps completed files
+so it can be resumed.
+
+Maps go under `Maps/<campaign folder>` and shared mods go under `Mods` in the
+selected SC2 installation. Symlinks inside these managed paths are rejected.
+Each SC2 installation has separate download and ownership records.
+
+Remove deletes unchanged files downloaded by this launcher. Files that existed
+before the launcher first recorded them, modified files, and unknown files are
+kept. Shared mods still needed by another known campaign are kept too. Campaigns
+installed with older versions can still be played and repaired, but their
+pre-existing files are not silently adopted for deletion.
+
+When the catalog is unavailable, the last valid catalog and recorded campaigns
+remain available. This does not change StarCraft II's own offline requirements.
+Closing the launcher leaves a started game process running.
+
+## Updating and removing the launcher
+
+Run the installer from a new source checkout or release to update the application.
+It checks for local edits before replacing recorded application files. Move any
+edited files to a backup location before retrying an update.
+
+The application menu includes a separate uninstall entry for each installation.
+From a source checkout, these commands do the same thing:
+
+```sh
+bash install-uninstall-SC2CLL.sh --uninstall local
+bash install-uninstall-SC2CLL.sh --uninstall custom
+bash install-uninstall-SC2CLL.sh --uninstall both
+```
+
+Uninstall removes only unchanged application files recorded by the installer.
+It keeps campaigns, preferences, download records, and unrelated files. A previous
+desktop entry replaced during installation is restored if it has not since been
+edited.
+
+The old copied `~/.local/bin/install-uninstall-SC2CLL.sh`, when present, is backed
+up as a text file under the configuration directory and replaced with a wrapper
+for the current installer. It no longer recursively removes a custom directory.
+Older application directories are kept because they have no file ownership
+record. Remove those manually after checking their contents.
+
+## Troubleshooting
+
+Launch failures include the runner's exit code and recent output, with a button
+to copy the details. Logs are under the application data directory:
+
+- Linux: `$XDG_DATA_HOME/SC2CampaignLauncher/logs`, normally
+  `~/.local/share/SC2CampaignLauncher/logs`
+- Windows: `%LOCALAPPDATA%\SC2CampaignLauncher\logs`
+
+Linux catalog and cover caches use `$XDG_CACHE_HOME/SC2CampaignLauncher`, normally
+`~/.cache/SC2CampaignLauncher`. Installer records use
+`$XDG_CONFIG_HOME/SC2CampaignLauncher`, normally `~/.config/SC2CampaignLauncher`.
+
+If automatic prefix detection is empty, select the existing prefix manually.
+If a custom Proton build fails, try the managed UMU option and include the launch
+log in a bug report. Include the distribution, desktop session, runner version,
+and campaign name.
+
+Qt chooses Wayland or X11 from the desktop session. If a particular system needs
+the X11 fallback, launch with `QT_QPA_PLATFORM=xcb`; it is not forced by the
+installed desktop entry.
+
+## Development and release builds
+
+```sh
+python -m pip install -e ".[test]"
+python -m pytest -q
+python -m ruff check .
+```
+
+Tests use isolated directories, a local HTTP server, mocked downloads, and offscreen Qt. They cover
+file verification, failed writes, cancellation, shared mods, install scopes,
+worker lifetime, runner arguments, and process lifetime. They do not substitute
+for launching StarCraft II on the intended Wine/Proton and desktop setup.
+
+On Linux, also run:
+
+```sh
+bash -n install-uninstall-SC2CLL.sh synergy_remote-installer.sh
+shellcheck install-uninstall-SC2CLL.sh synergy_remote-installer.sh
+desktop-file-validate SC2-Campaign-Launcher-Linux_Install-Uninstall.desktop
+```
+
+Build the Windows release on Windows:
+
+```powershell
+python -m pip install -e ".[build]"
+python tools/build_release.py
+```
+
+The build checks Qt and artwork, then writes the complete distribution to
+`dist/SC2CampaignLauncher-Windows-x86_64.zip`. Publish that ZIP, not the executable
+alone. CI also produces the ZIP as a build artifact without publishing a release.
+
+When changing the release version, update `pyproject.toml`, the package version,
+and `RELEASE_REF` in `synergy_remote-installer.sh`, then run
+`python tools/write_installer_entry.py` to update the desktop installer.
+
+## Planned work
+
+- Additional campaign sources beyond the current catalog
+- Moving installed campaigns between SC2 directories
+- Sorting by author, update date, or map count, and displaying update dates
+- Exploring SC2 installation through [Naturalize](https://github.com/MetalMan1245/naturalize)
+
+## Credits and license
+
+Campaigns and the original launcher are by Synergy and the respective campaign
+authors. The [original Windows launcher](https://github.com/R-P-S/SC2CampaignLauncher)
+is available separately. This Linux implementation was inspired by
+[ZachZimm's port](https://github.com/ZachZimm/Synergy-Mod-Launcher-Linux).
+An independent [macOS version](https://github.com/Swagdude7/SC2-Synergy-Launcher-Mac)
+is also available.
+
+The launcher is licensed under GPL-3.0; see LICENSE. StarCraft II belongs to
+Blizzard Entertainment. Campaign assets belong to their respective owners.

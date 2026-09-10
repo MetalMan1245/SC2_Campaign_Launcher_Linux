@@ -1,0 +1,60 @@
+name: Check launcher
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install -e ".[test]"
+      - if: matrix.python == '3.10'
+        run: python -m pip install "PyQt6==6.2.3" "PyQt6-Qt6==6.2.4"
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0 desktop-file-utils shellcheck unzip
+      - run: python -m pytest -q
+        env:
+          QT_QPA_PLATFORM: offscreen
+      - run: python -m ruff check .
+      - if: runner.os == 'Linux'
+        run: |
+          bash -n install-uninstall-SC2CLL.sh synergy_remote-installer.sh
+          shellcheck install-uninstall-SC2CLL.sh synergy_remote-installer.sh
+          desktop-file-validate SC2-Campaign-Launcher-Linux_Install-Uninstall.desktop
+      - run: python -m sc2_campaign_launcher_linux --smoke-test
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+  windows-bundle:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e ".[build]"
+      - run: python tools/build_release.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: SC2CampaignLauncher-Windows-x86_64
+          path: dist/SC2CampaignLauncher-Windows-x86_64.zip
+          if-no-files-found: error
