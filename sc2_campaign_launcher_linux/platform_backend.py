@@ -141,6 +141,11 @@ def windows_map_path(path: Path, prefix: Path) -> str:
     raise ValueError('The map is outside the prefix and has no Wine drive mapping. '
                      'Add a drive mapping in winecfg or choose the matching prefix.')
 
+def linux_map_path(map_path: Path) -> str:
+    # Z:-prefixed POSIX path resolves via wine's default Z: drive regardless
+    # of Proton game-drive setup; the C:\ form breaks when game drives fail
+    # (Debian/Steam Proton: "unable to use parent for game drive").
+    return 'Z:' + str(map_path.resolve()).replace('\\', '/')
 
 @dataclass(frozen=True)
 class LaunchOptions:
@@ -176,9 +181,8 @@ class LinuxBackend:
         env = dict(os.environ)
         env['WINEPREFIX'] = str(prefix)
         switcher = str(root / 'Support64/SC2Switcher_x64.exe')
-        # Retain the drive_c alias when the game directory links to another disk.
-        logical_map = root / map_path.resolve().relative_to(root.resolve())
-        map_arg = windows_map_path(logical_map, Path(options.prefix).expanduser())
+        switcher = str(root / 'Support64/SC2Switcher_x64.exe')
+        map_arg = linux_map_path(map_path)
         if options.runner == MANAGED_PROTON:
             runner = None
         else:
@@ -197,6 +201,8 @@ class LinuxBackend:
             raise ValueError(f'UMU is not executable: {umu_path}')
         if runner:
             env['PROTONPATH'] = str(runner[1].resolve())
+            env.update(PROTON_VERB='run', GAMEID='umu-default',
+           STEAM_COMPAT_INSTALL_PATH=str(root))
         else:
             env.pop('PROTONPATH', None)
         env.update(PROTON_VERB='run', GAMEID='umu-default')
