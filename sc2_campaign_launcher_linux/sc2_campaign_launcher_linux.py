@@ -18,11 +18,11 @@ from PyQt6.QtGui import QColor, QDesktopServices, QFont, QIcon, QImageReader, QP
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
     QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import __version__
-from .catalog import Catalog, CatalogResult
+from .catalog import Catalog, CatalogResult, SOURCES
 from .files import Cancelled, check_cancel
 from .jobs import JobPool
 from .launching import LaunchManager
@@ -33,6 +33,10 @@ from .platform_backend import (
 )
 from .settings import AppSettings
 
+TAB_SECTIONS = (
+    {'name': 'Synergy', 'shows': lambda c: c.get('source') == 'Synergy'},
+    {'name': 'Extra', 'shows': lambda c: c.get('source') != 'Synergy'},
+)
 
 class PlainHTML(HTMLParser):
     def __init__(self):
@@ -503,8 +507,9 @@ class MainWindow(QMainWindow):
         title.setWordWrap(True)
         header.addWidget(title, 1)
         for text, asset, url in (
-            ('Discord', 'discord.png', 'https://discord.gg/adK8CeHtRa'),
-            ('Patreon', 'patreon.png', 'https://www.patreon.com/SynergySC2'),
+            ('Synergy', 'synergy.png', 'https://www.patreon.com/SynergySC2'),
+            ('Website', 'website.png', 'https://sc2.sarl'),
+            ('Patreon', 'patreon.png', 'https://www.patreon.com/MetalMan1245'),
         ):
             button = QPushButton(QIcon(str(settings.asset_dir() / asset)), '')
             button.setFixedSize(40, 40)
@@ -529,18 +534,25 @@ class MainWindow(QMainWindow):
         self.notice.setTextFormat(Qt.TextFormat.PlainText)
         self.notice.hide()
         layout.addWidget(self.notice)
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll.setStyleSheet('QScrollArea { border: none; background: transparent; }')
-        self.grid_widget = QWidget()
-        self.grid = QGridLayout(self.grid_widget)
-        self.grid.setSpacing(16)
-        self.grid.setContentsMargins(8, 8, 8, 8)
-        self.grid.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.scroll.setWidget(self.grid_widget)
-        layout.addWidget(self.scroll)
-        self.scroll.viewport().installEventFilter(self)
+        self.tabs = QTabWidget()
+        self.tab_grids: dict[str, QGridLayout] = {}
+        self.tab_viewports: dict[str, QWidget] = {}
+        for section in TAB_SECTIONS:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setStyleSheet('QScrollArea { border: none; background: transparent; }')
+            grid_widget = QWidget()
+            grid = QGridLayout(grid_widget)
+            grid.setSpacing(16)
+            grid.setContentsMargins(8, 8, 8, 8)
+            grid.setAlignment(Qt.AlignmentFlag.AlignTop)
+            scroll.setWidget(grid_widget)
+            self.tabs.addTab(scroll, section['name'])
+            self.tab_grids[section['name']] = grid
+            self.tab_viewports[section['name']] = scroll.viewport()
+            scroll.viewport().installEventFilter(self)
+        layout.addWidget(self.tabs)
         self.settings_btn.setFocus()
         if autoload:
             self.load_campaigns()
@@ -619,21 +631,26 @@ class MainWindow(QMainWindow):
             self._update_controls()
 
     def _layout_cards(self):
-        while self.grid.count():
-            self.grid.takeAt(0)
-        margins = self.grid.contentsMargins()
-        available = self.scroll.viewport().width() - margins.left() - margins.right()
-        columns = max(1, (available + self.grid.spacing()) // (280 + self.grid.spacing()))
-        for index, card in enumerate(self.cards.values()):
-            self.grid.addWidget(card, index // columns, index % columns, Qt.AlignmentFlag.AlignHCenter)
+        for section in TAB_SECTIONS:
+            grid = self.tab_grids[section['name']]
+            members = [card for card in self.cards.values() if section['shows'](card.campaign)]
+            while grid.count():
+                grid.takeAt(0)
+            margins = grid.contentsMargins()
+            viewport = self.tab_viewports[section['name']]
+            available = viewport.width() - margins.left() - margins.right()
+            spacing = grid.spacing()
+            columns = max(1, (available + spacing) // (280 + spacing))
+            for index, card in enumerate(members):
+                grid.addWidget(card, index // columns, index % columns, Qt.AlignmentFlag.AlignHCenter)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, 'scroll'):
+        if hasattr(self, 'tabs'):
             self._layout_cards()
 
     def eventFilter(self, watched, event):
-        if watched is self.scroll.viewport() and event.type() == QEvent.Type.Resize:
+        if event.type() == QEvent.Type.Resize and watched in self.tab_viewports.values():
             self._layout_cards()
         return super().eventFilter(watched, event)
 

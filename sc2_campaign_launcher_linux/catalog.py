@@ -82,6 +82,7 @@ def parse_campaign(entry: dict, source_base: str = '') -> dict:
         'version': str(entry.get('version', '1.0'))[:80], 'author': str(author)[:200],
         'asset': asset, 'maps': maps, 'mods': mods,
         'source_base': base,
+        'source': str(entry.get('source', 'Synergy'))[:80],
         'game': game, 'type': kind, 'has_launcher': has_launcher, 'tags': tags.strip(),
     }
 
@@ -126,6 +127,7 @@ def raw_campaign(campaign: dict) -> dict:
         'game': campaign['game'], 'type': campaign['type'],
         'has_launcher': campaign['has_launcher'], 'tags': campaign['tags'],
         'source_base': campaign.get('source_base', BASE_URL),
+        'source': campaign.get('source', 'Synergy'),
     }
 
 
@@ -148,6 +150,8 @@ class Catalog:
             try:
                 data = self.client.json(source['maps'], cancel)
                 result, errors = parse_catalog(data, source['base'])
+                for campaign in result:
+                    campaign['source'] = source['name']
                 check_cancel(cancel)
                 campaigns.extend(result)
                 if errors:
