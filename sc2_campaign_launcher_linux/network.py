@@ -17,7 +17,7 @@ from .files import Cancelled, check_cancel
 
 ALLOWED_HOSTS = frozenset({
     'github.com', 'raw.githubusercontent.com', 'objects.githubusercontent.com',
-    'release-assets.githubusercontent.com', 'media.githubusercontent.com',
+    'release-assets.githubusercontent.com', 'media.githubusercontent.com', 'sc2.sarl',
 })
 CHUNK_SIZE = 256 * 1024
 
