@@ -9,7 +9,7 @@ from threading import Event
 from urllib.parse import quote, urlsplit
 
 from .files import Cancelled, atomic_json, check_cancel, contained_path, read_json, relative_name
-from .network import HttpClient, validate_url, HttpClient, ALLOWED_HOSTS
+from .network import HttpClient, validate_url, ALLOWED_HOSTS
 
 REPOSITORY = 'R-P-S/SC2Campaigns'
 BASE_URL = f'https://raw.githubusercontent.com/{REPOSITORY}/main'
@@ -82,7 +82,7 @@ def parse_campaign(entry: dict, source_base: str = '') -> dict:
         'version': str(entry.get('version', '1.0'))[:80], 'author': str(author)[:200],
         'asset': asset, 'maps': maps, 'mods': mods,
         'source_base': base,
-        'source': str(entry.get('source', 'Synergy'))[:80],
+        'source': '',  # Will be assigned by Catalog.load()
         'game': game, 'type': kind, 'has_launcher': has_launcher, 'tags': tags.strip(),
     }
 
@@ -130,7 +130,6 @@ def raw_campaign(campaign: dict) -> dict:
         'source': campaign.get('source', 'Synergy'),
     }
 
-
 @dataclass
 class CatalogResult:
     campaigns: list[dict]
@@ -143,42 +142,54 @@ class Catalog:
         self.cache_dir = cache_dir
         self.client = client or HttpClient()
 
-    def load(self, cancel: Event) -> CatalogResult:
+    def load(self, cancel: Event) -> tuple[list[dict], str]:
+        """Load campaigns from every source; source identity comes from SOURCES."""
         cached_path = self.cache_dir / 'catalog.json'
-        campaigns, notice = [], ''
+        campaigns: list[dict] = []
+        notices: list[str] = []
+
         for source in SOURCES:
             try:
                 data = self.client.json(source['maps'], cancel)
                 result, errors = parse_catalog(data, source['base'])
+                # Assign source identity from the SOURCES entry used
                 for campaign in result:
                     campaign['source'] = source['name']
                 check_cancel(cancel)
                 campaigns.extend(result)
                 if errors:
-                    notice = f'{notice}; {"; ".join(errors[:3])}'.strip('; ')
+                    notices.append(f"{source['name']}: {'; '.join(errors[:3])}")
             except Cancelled:
                 raise
             except (OSError, ValueError) as error:
-                notice = f'{notice}; {source["name"]}: {error}'.strip('; ')
+                notices.append(f'{source["name"]}: {error}')
+
         check_cancel(cancel)
+
+        # Fallback to cached catalog
         if not campaigns:
             try:
                 campaigns, _ = parse_catalog(read_json(cached_path))
-                return CatalogResult(campaigns, f'{notice}\nOffline catalog.', True)
+                for campaign in campaigns:
+                    campaign.setdefault('source', 'Synergy')
             except (OSError, ValueError, TypeError):
-                return CatalogResult([], f'Could not load any catalog: {notice}', True)
+                pass
+
+        notice = '; '.join(notices) if notices else ''
+
+        # Dedupe by slug across sources (first source wins)
         unique: dict[str, dict] = {}
         for campaign in campaigns:
-            key = campaign['slug'].casefold()
-            if key in unique:
-                notice = f'{notice}; Duplicate campaign folder: {campaign["slug"]}'.strip('; ')
-            unique.setdefault(key, campaign)
+            unique.setdefault(campaign['slug'].casefold(), campaign)
         campaigns = list(unique.values())
+
+        # Update cache
         try:
             atomic_json(cached_path, [raw_campaign(c) for c in campaigns])
         except OSError as error:
-            notice = f'{notice}\nCould not cache the catalog: {error}'.strip('; ')
-        return CatalogResult(campaigns, notice)
+            notice = f'{notice}\nCache update failed: {error}'
+
+        return campaigns, notice
 
     def details(self, campaign: dict, cancel: Event) -> dict:
         title = quote(campaign['name'], safe='')
@@ -205,7 +216,8 @@ class Catalog:
 
         title = quote(campaign['name'], safe='')
         asset = quote(campaign['asset'], safe='/')
-        url = f'{campaign.get('source_base', BASE_URL)}/campaigns/{title}/assets/{asset}'
+        base = campaign.get('source_base', BASE_URL)
+        url = f'{base}/campaigns/{title}/assets/{asset}'
         key = hashlib.sha256((url + campaign['version']).encode()).hexdigest()
         cache = contained_path(self.cache_dir, 'covers', key)
         try:

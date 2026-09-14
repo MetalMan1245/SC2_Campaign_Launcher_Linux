@@ -34,8 +34,9 @@ from .platform_backend import (
 from .settings import AppSettings
 
 TAB_SECTIONS = (
-    {'name': 'Synergy', 'shows': lambda c: c.get('source') == 'Synergy'},
-    {'name': 'Extra', 'shows': lambda c: c.get('source') != 'Synergy'},
+    {'name': 'Custom', 'shows': lambda c: c.get('type') == 'custom'},
+    {'name': 'Synergy', 'shows': lambda c: c.get('source') == 'Synergy' and 'sc2.sarl' not in c.get('source_base', '')},
+    {'name': 'Extra', 'shows': lambda c: c.get('type') != 'custom' and 'sc2.sarl' in c.get('source_base', '')},
 )
 
 class PlainHTML(HTMLParser):
@@ -572,12 +573,12 @@ class MainWindow(QMainWindow):
             self._set_notice('Checking campaign files...' if force else 'Loading campaigns...')
 
         def load(cancel, notify):
-            result = self.catalog.load(cancel)
-            available = result.campaigns or previous
+            campaigns, notice = self.catalog.load(cancel)
+            available = campaigns or previous
             merged = {c['slug']: c for c in library.recorded_campaigns()}
             merged.update((c['slug'], c) for c in available)
-            return CatalogResult(library.statuses(list(merged.values()), cancel, force),
-                                 result.notice or library.problem, result.offline)
+            verified = library.statuses(list(merged.values()), cancel, force)
+            return CatalogResult(verified, notice or library.problem, False)
 
         self.fetcher = self.jobs.submit(load, lambda result, error: self._loaded(generation, result, error),
                                         owner=self, priority=True)
@@ -599,7 +600,6 @@ class MainWindow(QMainWindow):
             self.load_campaigns(force)
 
     def _render(self, campaigns, generation):
-        self.campaigns = campaigns
         keep = {c['slug'] for c in campaigns}
         for slug in list(self.cards):
             if slug not in keep and slug != self.mutation_slug and slug not in self.launcher.processes:
