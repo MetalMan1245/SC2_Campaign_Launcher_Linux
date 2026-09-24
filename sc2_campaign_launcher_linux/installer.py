@@ -369,7 +369,7 @@ def dependency_command():
     elif distro in ('debian', 'ubuntu', 'linuxmint', 'pop'):
         command = ['apt-get', 'install', 'python3-pyqt6']
     elif distro in ('fedora', 'nobara'):
-        command = ['dnf', 'install', 'python3-qt6']
+        command = ['dnf', 'install', 'python3-pyqt6']
     else:
         return []
     return ['sudo', *command] if shutil.which(command[0]) and shutil.which('sudo') else []
