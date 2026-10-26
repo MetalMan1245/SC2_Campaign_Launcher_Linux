@@ -2,6 +2,7 @@
 """Download, verify, and launch custom StarCraft II campaigns."""
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -16,13 +17,14 @@ if __package__ in (None, ''):
 from PyQt6.QtCore import QEvent, QEventLoop, QLockFile, QSize, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QFont, QIcon, QImageReader, QPalette, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
+    QApplication, QBoxLayout, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
     QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
+    QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import __version__
-from .catalog import Catalog, CatalogResult
+from .catalog import Catalog, CatalogResult, sort_campaigns
 from .files import Cancelled, check_cancel
 from .jobs import JobPool
 from .launching import LaunchManager
@@ -33,6 +35,11 @@ from .platform_backend import (
 )
 from .settings import AppSettings
 
+TAB_SECTIONS = (
+    {'name': 'Custom', 'shows': lambda c: c.get('type') == 'custom'},
+    {'name': 'Synergy', 'shows': lambda c: c.get('type') != 'custom' and c.get('source', 'Synergy') == 'Synergy'},
+    {'name': 'Extra', 'shows': lambda c: c.get('type') != 'custom' and c.get('source', 'Synergy') != 'Synergy'},
+)
 
 class PlainHTML(HTMLParser):
     def __init__(self):
@@ -105,11 +112,14 @@ class SettingsDialog(QDialog):
         self.first_run = first_run
         self.scanner = None
         self.discovery = None
+        self.updater = None
         self.closed = False
         self.custom = list(settings.custom_runners())
         self.setWindowTitle('Set up StarCraft II' if first_run else 'Settings')
         self.resize(660, 320)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
         intro = QLabel('Choose the existing StarCraft II installation you use to play campaigns.')
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -122,9 +132,14 @@ class SettingsDialog(QDialog):
         browse.clicked.connect(self._browse_root)
         root_row.addWidget(browse)
         self.scan_btn = QPushButton('Scan')
+        self.scan_btn.setText('Find game')
         self.scan_btn.clicked.connect(self._scan)
         root_row.addWidget(self.scan_btn)
-        form.addRow('StarCraft II:', root_row)
+        form.addRow('Game folder:', root_row)
+        location_hint = QLabel('Choose the folder containing Support64. StarCraft II must already be installed.')
+        location_hint.setWordWrap(True)
+        location_hint.setObjectName('hint')
+        form.addRow('', location_hint)
         self.prefix_in = QLineEdit(settings.wine_prefix())
         self.auto_prefix = QCheckBox('Detect prefix from the SC2 directory')
         self.auto_prefix.setChecked(settings.auto_prefix())
@@ -151,7 +166,25 @@ class SettingsDialog(QDialog):
             prefix_row.addWidget(prefix_browse)
             form.addRow('Wine prefix:', prefix_row)
             form.addRow('', self.auto_prefix)
-            form.addRow('UMU executable:', self.umu_in)
+            prefix_hint = QLabel('A Wine prefix is the folder containing drive_c. Managed Proton uses UMU and may download Proton on first play.')
+            prefix_hint.setWordWrap(True)
+            prefix_hint.setObjectName('hint')
+            form.addRow('', prefix_hint)
+            self.advanced = QToolButton()
+            self.advanced.setText('Advanced runner settings')
+            self.advanced.setCheckable(True)
+            self.advanced.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            self.advanced.setArrowType(Qt.ArrowType.RightArrow)
+            self.advanced_fields = QWidget()
+            advanced_form = QFormLayout(self.advanced_fields)
+            advanced_form.setContentsMargins(0, 0, 0, 0)
+            advanced_form.addRow('UMU executable:', self.umu_in)
+            self.advanced_fields.hide()
+            self.advanced.toggled.connect(self.advanced_fields.setVisible)
+            self.advanced.toggled.connect(lambda checked: self.advanced.setArrowType(
+                Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow))
+            form.addRow('', self.advanced)
+            form.addRow('', self.advanced_fields)
             self.auto_prefix.toggled.connect(self._preview_prefix)
             self.sc2_in.textChanged.connect(self._preview_prefix)
             self._preview_prefix()
@@ -159,6 +192,7 @@ class SettingsDialog(QDialog):
         self.status = QLabel('')
         self.status.setWordWrap(True)
         self.status.setTextFormat(Qt.TextFormat.PlainText)
+        self.status.setAccessibleName('Setup status')
         layout.addWidget(self.status)
         layout.addStretch()
         buttons = QHBoxLayout()
@@ -169,16 +203,43 @@ class SettingsDialog(QDialog):
             self.verify_btn.clicked.connect(lambda: self._refresh(True))
             buttons.addWidget(self.refresh_btn)
             buttons.addWidget(self.verify_btn)
+            self.update_btn = QPushButton('Check for updates')
+            self.update_btn.clicked.connect(self._check_updates)
+            buttons.addWidget(self.update_btn)
         buttons.addStretch()
         cancel = QPushButton('Cancel')
         cancel.clicked.connect(self.reject)
-        self.save_btn = QPushButton('Start' if first_run else 'Save')
+        self.save_btn = QPushButton('Continue' if first_run else 'Save')
+        self.save_btn.setProperty('primary', True)
+        self.save_btn.setDefault(True)
         self.save_btn.clicked.connect(self._save)
         buttons.addWidget(cancel)
         buttons.addWidget(self.save_btn)
         layout.addLayout(buttons)
         if settings.backend.needs_runner_selection:
             self._discover(settings.runner())
+
+    def _check_updates(self):
+        from .updates import check_update
+        if self.updater is not None:
+            return
+        self.update_btn.setEnabled(False)
+        platform = self.settings.backend.name
+        self.updater = self.jobs.submit(lambda cancel, notify: check_update(platform), self._update_checked, owner=self)
+
+    def _update_checked(self, result, error):
+        self.updater = None
+        if self.closed:
+            return
+        self.update_btn.setEnabled(True)
+        if error:
+            self.status.setText(str(error))
+            return
+        message, url = result
+        self.status.setText(message)
+        if QMessageBox.question(self, 'Launcher updates', message + '\n\nOpen the repository?') \
+                == QMessageBox.StandardButton.Yes:
+            QDesktopServices.openUrl(QUrl(url))
 
     def _refresh(self, force):
         self.refresh_requested.emit(force)
@@ -263,7 +324,7 @@ class SettingsDialog(QDialog):
         self.scanner = None
         if self.closed:
             return
-        self.scan_btn.setText('Scan')
+        self.scan_btn.setText('Find game')
         if error:
             self.status.setText('Scan cancelled.' if isinstance(error, Cancelled) else str(error))
             return
@@ -284,27 +345,36 @@ class SettingsDialog(QDialog):
                     self._start_scan([Path(folder)])
 
     def _save(self):
+        if self.closed:
+            return
+        focus = self.sc2_in
         try:
             root = validate_root(self.sc2_in.text())
             runner = self.runner_combo.currentData() or MANAGED_PROTON
             prefix = self.prefix_in.text().strip()
             if self.settings.backend.needs_runner_selection:
+                focus = self.prefix_in
                 validate_prefix(prefix)
+                focus = self.runner_combo
                 if runner != MANAGED_PROTON and fingerprint_runner(Path(runner)) is None:
                     raise ValueError('Choose an installed Wine or Proton version.')
                 umu = self.umu_in.text().strip()
+                focus = self.umu_in
                 if umu and (not Path(umu).is_absolute() or not Path(umu).is_file()):
                     raise ValueError('The UMU executable must be an existing absolute path.')
             self.settings.save(root, runner, self.auto_prefix.isChecked(), prefix,
                                self.umu_in.text().strip(), self.custom)
         except (ValueError, OSError) as error:
             self.status.setText(str(error))
+            if focus is self.umu_in and hasattr(self, 'advanced'):
+                self.advanced.setChecked(True)
+            focus.setFocus()
             return
         self.accept()
 
     def done(self, result):
         self.closed = True
-        for job in (self.scanner, self.discovery):
+        for job in (self.scanner, self.discovery, self.updater):
             if job is not None:
                 job.cancel.set()
         super().done(result)
@@ -326,12 +396,12 @@ class CampaignCard(QFrame):
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
         layout.setContentsMargins(12, 12, 12, 12)
-        self.cover = QLabel(campaign['name'][:30])
+        self.cover = QLabel(campaign['name'])
         self.cover.setTextFormat(Qt.TextFormat.PlainText)
         self.cover.setWordWrap(True)
         self.cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.cover.setFixedSize(256, 144)
-        self.cover.setStyleSheet('background: #1a1a1a; color: #666; border-radius: 4px;')
+        self.cover.setStyleSheet('background: #1a1a1a; color: #bcbcbc; border-radius: 4px;')
         self.cover.setFont(QFont('Arial', 16, QFont.Weight.Bold))
         layout.addWidget(self.cover, alignment=Qt.AlignmentFlag.AlignHCenter)
         self.remove = QPushButton(QIcon(str(assets / 'settings.png')), '', self.cover)
@@ -347,7 +417,7 @@ class CampaignCard(QFrame):
             button.setIconSize(QSize(28, 28))
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setStyleSheet('QPushButton { border: none; background: transparent; padding: 0; }'
-                                'QPushButton:focus { border: 1px solid #6d4aff; }')
+                                'QPushButton:focus { border: 2px solid #b8d5ff; }')
         self.title = QLabel()
         self.title.setTextFormat(Qt.TextFormat.PlainText)
         self.title.setWordWrap(True)
@@ -361,9 +431,8 @@ class CampaignCard(QFrame):
         self.version = QLabel()
         for label in (self.author, self.version):
             label.setTextFormat(Qt.TextFormat.PlainText)
-            label.setStyleSheet('color: #999; font-size: 11px;')
-        meta.addWidget(self.author)
-        meta.addStretch()
+            label.setStyleSheet('color: #bcbcbc; font-size: 12px; background: transparent;')
+        meta.addWidget(self.author, 1)
         meta.addWidget(self.version)
         layout.addLayout(meta)
         self.status = QLabel()
@@ -371,8 +440,15 @@ class CampaignCard(QFrame):
         self.status.setWordWrap(True)
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status.setFixedHeight(23)
-        self.status.setStyleSheet('color: #999; font-size: 11px;')
+        self.status.setStyleSheet('color: #bcbcbc; font-size: 12px; background: transparent;')
         layout.addWidget(self.status)
+        self.progress = QProgressBar()
+        self.progress.setAccessibleName('Campaign download progress')
+        self.progress.setFixedHeight(6)
+        self.progress.setTextVisible(False)
+        self.progress.hide()
+        layout.addWidget(self.progress)
+        layout.setSpacing(6)
         controls = QHBoxLayout()
         controls.addStretch()
         self.play = QPushButton()
@@ -386,7 +462,10 @@ class CampaignCard(QFrame):
     def update_campaign(self, campaign):
         self.campaign = campaign
         self.title.setText(campaign['name'])
-        self.author.setText(f'Author: {self.details.get("author", campaign["author"])}')
+        self.author.setText(self.details.get('author', campaign['author']))
+        self.author.setToolTip(self.author.text())
+        self.author.setMinimumWidth(0)
+        self.author.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.version.setText(f'v{campaign["version"]}')
         description = plain_html(self.details.get('description') or campaign.get('description', ''))
         self.info.setToolTip('<p>' + escape(description).replace('\n', '<br>') + '</p>'
@@ -397,12 +476,12 @@ class CampaignCard(QFrame):
                                'not_installed': 'Install', 'error': 'Retry'}.get(status, 'Install'))
             self.status.setText('Check campaign files' if campaign.get('error') else status.replace('_', ' ').title())
             self.status.setToolTip(campaign.get('error', ''))
-            color, hover = {'installed': ('#27ae60', '#229954'),
-                            'update_available': ('#e67e22', '#d35400')}.get(status, ('#3498db', '#2980b9'))
+            color, hover = '#245b94', '#2e6aab'
             self.play.setStyleSheet(
                 f'QPushButton {{ background: {color}; color: white; border: none; '
                 'border-radius: 4px; font-weight: bold; }'
                 f'QPushButton:hover {{ background: {hover}; }}'
+                'QPushButton:focus { border: 2px solid #b8d5ff; }'
                 'QPushButton:disabled { background: #3a3a3a; color: #999; }')
         self.remove.setEnabled(campaign.get('removable', False) and not self.busy and not self.running)
         self.remove.setToolTip('Remove campaign')
@@ -424,11 +503,14 @@ class CampaignCard(QFrame):
         self.play.setEnabled(True)
         self.remove.setEnabled(False)
         self.status.setText(text)
+        self.progress.setRange(0, 0)
+        self.progress.show()
 
     def set_idle(self):
         self.busy = False
         self.play.setEnabled(not self.running)
         self.update_campaign(self.campaign)
+        self.progress.hide()
 
     def set_running(self, running):
         self.running = running
@@ -443,6 +525,9 @@ class CampaignCard(QFrame):
         progress = f'{min(100, int(received * 100 / total))}%' if total else f'{received / 1024 / 1024:.1f} MB'
         self.status.setText(f'File {data["index"]}/{data["count"]}: {progress}')
         self.status.setToolTip(data['name'])
+        self.progress.setRange(0, 100 if total else 0)
+        if total:
+            self.progress.setValue(min(100, int(received * 100 / total)))
 
     def set_media(self, details, data):
         self.details = details
@@ -464,9 +549,11 @@ class CampaignCard(QFrame):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, settings: AppSettings, jobs=None, catalog=None, launcher=None, autoload=True):
+    def __init__(self, settings: AppSettings, jobs=None, catalog=None, launcher=None, autoload=True, include_ccm=True, ccm_only=False):
         super().__init__()
         self.settings = settings
+        self.ccm_only = ccm_only
+        self.ccm_page = None
         self.jobs = jobs or JobPool(self)
         self.catalog = catalog or Catalog(settings.backend.cache_dir())
         self.launcher = launcher or LaunchManager(settings.backend, settings.backend.data_dir() / 'logs', self)
@@ -485,37 +572,35 @@ class MainWindow(QMainWindow):
         self.closing = False
         self.operation_notice = ''
         self.jobs.idle.connect(self._jobs_idle)
-        self.setWindowTitle('SC2 Campaign Launcher')
+        self.setWindowTitle('SC2 Campaign Manager' if ccm_only else 'SC2 Campaign Launcher')
         self.setWindowRole('SC2CampaignLauncher')
         self.setWindowIcon(QIcon(str(settings.asset_dir() / 'logo.png')))
         self.resize(1300, 800)
-        self.setMinimumSize(340, 420)
+        self.setMinimumSize(380, 480)
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
-        self.setStyleSheet('QMainWindow, QWidget { background: #1e1e1e; }')
+        self.setStyleSheet('QMainWindow { background: #252525; }')
         header = QHBoxLayout()
-        title = QLabel('SC2 Campaign Launcher')
+        title = QLabel('SC2 Campaign Manager' if ccm_only else 'SC2 Campaign Launcher')
         title.setFont(QFont('Arial', 18, QFont.Weight.Bold))
         title.setStyleSheet('color: white;')
         title.setWordWrap(True)
         header.addWidget(title, 1)
+        links = QToolButton()
+        links.setText('Links')
+        links.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        links.setMenu(QMenu(links))
         for text, asset, url in (
-            ('Discord', 'discord.png', 'https://discord.gg/adK8CeHtRa'),
-            ('Patreon', 'patreon.png', 'https://www.patreon.com/SynergySC2'),
+            ('Synergy', 'synergy.png', 'https://www.patreon.com/SynergySC2'),
+            ('Website', 'website.png', 'https://sc2.sarl'),
+            ('Patreon', 'patreon.png', 'https://www.patreon.com/MetalMan1245'),
         ):
-            button = QPushButton(QIcon(str(settings.asset_dir() / asset)), '')
-            button.setFixedSize(40, 40)
-            button.setIconSize(QSize(40, 40))
-            button.setStyleSheet('QPushButton { border: none; background: transparent; padding: 0; }'
-                                'QPushButton:focus { border: 1px solid #6d4aff; }')
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setToolTip(text)
-            button.setAccessibleName(text)
-            button.clicked.connect(lambda checked=False, link=url: QDesktopServices.openUrl(QUrl(link)))
-            header.addWidget(button)
+            action = links.menu().addAction(QIcon(str(settings.asset_dir() / asset)), text)
+            action.triggered.connect(lambda checked=False, link=url: QDesktopServices.openUrl(QUrl(link)))
+        header.addWidget(links)
         self.settings_btn = QPushButton('Settings')
         self.settings_btn.setStyleSheet(
             'QPushButton { background: #3a3a3a; color: white; border: 1px solid #4a4a4a; '
@@ -529,23 +614,96 @@ class MainWindow(QMainWindow):
         self.notice.setTextFormat(Qt.TextFormat.PlainText)
         self.notice.hide()
         layout.addWidget(self.notice)
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll.setStyleSheet('QScrollArea { border: none; background: transparent; }')
-        self.grid_widget = QWidget()
-        self.grid = QGridLayout(self.grid_widget)
-        self.grid.setSpacing(16)
-        self.grid.setContentsMargins(8, 8, 8, 8)
-        self.grid.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.scroll.setWidget(self.grid_widget)
-        layout.addWidget(self.scroll)
-        self.scroll.viewport().installEventFilter(self)
+        self.recover_launch_btn = QPushButton('Recover launch controls')
+        self.recover_launch_btn.clicked.connect(self._recover_launch)
+        self.recover_launch_btn.hide()
+        layout.addWidget(self.recover_launch_btn)
+        self.tabs = QTabWidget()
+        self.tab_grids: dict[str, QGridLayout] = {}
+        self.tab_viewports: dict[str, QWidget] = {}
+        self.empty_labels = {}
+        self.catalog_pages = {}
+        self.catalog_scrolls = {}
+        for section in TAB_SECTIONS:
+            if section['name'] == 'Custom' and include_ccm:
+                from .ccm_ui import CCMPage
+                self.ccm_page = CCMPage(settings, self.jobs, self.launcher, catalog_available=not ccm_only)
+                self.ccm_page.busy_changed.connect(self._update_controls)
+                self.tabs.addTab(self.ccm_page, 'My campaigns')
+                continue
+            if ccm_only:
+                continue
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setStyleSheet('QScrollArea { border: none; background: transparent; }')
+            grid_widget = QWidget()
+            grid = QGridLayout(grid_widget)
+            grid.setSpacing(16)
+            grid.setContentsMargins(8, 8, 8, 8)
+            grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            scroll.setWidget(grid_widget)
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 8, 0, 0)
+            page_layout.setSpacing(8)
+            page_layout.addWidget(scroll, 1)
+            self.tabs.addTab(page, {'Custom': 'My campaigns', 'Synergy': 'Browse campaigns', 'Extra': 'More campaigns'}[section['name']])
+            self.catalog_pages[page] = page_layout
+            self.catalog_scrolls[section['name']] = scroll
+            self.tab_grids[section['name']] = grid
+            self.tab_viewports[section['name']] = scroll.viewport()
+            empty = QLabel(grid_widget)
+            empty.setTextFormat(Qt.TextFormat.PlainText)
+            empty.setWordWrap(True)
+            empty.setObjectName('emptyState')
+            empty.hide()
+            self.empty_labels[section['name']] = empty
+            scroll.viewport().installEventFilter(self)
+        layout.addWidget(self.tabs, 1)
+        self.catalog_tools = QWidget(self)
+        self.catalog_tools.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.catalog_toolbar = QHBoxLayout(self.catalog_tools)
+        self.catalog_toolbar.setContentsMargins(0, 0, 0, 0)
+        self.catalog_toolbar.setSpacing(8)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText('Search campaigns or authors')
+        self.search.setAccessibleName('Search campaigns or authors')
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._layout_cards)
+        self.catalog_toolbar.addWidget(self.search, 1)
+        self.sort = QComboBox()
+        self.sort.setAccessibleName('Sort campaigns')
+        for label, key in [('Name', 'name'), ('Author', 'author'), ('Last updated', 'updated'), ('Map count', 'maps')]:
+            self.sort.addItem('Sort: ' + label, key)
+        self.sort.setCurrentIndex(max(0, self.sort.findData(settings.settings.value('campaign_sort', 'name'))))
+        self.sort.currentIndexChanged.connect(self._layout_cards)
+        self.catalog_toolbar.addWidget(self.sort)
+        self.refresh_btn = QPushButton('Refresh')
+        self.refresh_btn.clicked.connect(lambda: self.load_campaigns())
+        self.catalog_toolbar.addWidget(self.refresh_btn)
+        self.tabs.currentChanged.connect(self._tab_changed)
+        if self.ccm_page is not None and not self.ccm_page.items and not ccm_only:
+            self.tabs.setCurrentIndex(1)
+        self._tab_changed(self.tabs.currentIndex())
+        self._layout_cards()
         self.settings_btn.setFocus()
-        if autoload:
+        self._update_controls()
+        if autoload and not ccm_only:
             self.load_campaigns()
 
+    def _tab_changed(self, index):
+        page = self.tabs.widget(index)
+        if page in self.catalog_pages:
+            self.catalog_pages[page].insertWidget(0, self.catalog_tools)
+            self.catalog_tools.show()
+        else:
+            self.catalog_tools.hide()
+
     def load_campaigns(self, force=False):
+        if self.ccm_page is not None and self.ccm_only:
+            self.ccm_page.reload()
+            return
         if self.closing:
             return
         if self.fetcher is not None or self.mutation is not None or self.queue:
@@ -564,8 +722,8 @@ class MainWindow(QMainWindow):
             available = result.campaigns or previous
             merged = {c['slug']: c for c in library.recorded_campaigns()}
             merged.update((c['slug'], c) for c in available)
-            return CatalogResult(library.statuses(list(merged.values()), cancel, force),
-                                 result.notice or library.problem, result.offline)
+            verified = library.statuses(list(merged.values()), cancel, force)
+            return CatalogResult(verified, result.notice or library.problem, result.offline)
 
         self.fetcher = self.jobs.submit(load, lambda result, error: self._loaded(generation, result, error),
                                         owner=self, priority=True)
@@ -619,32 +777,60 @@ class MainWindow(QMainWindow):
             self._update_controls()
 
     def _layout_cards(self):
-        while self.grid.count():
-            self.grid.takeAt(0)
-        margins = self.grid.contentsMargins()
-        available = self.scroll.viewport().width() - margins.left() - margins.right()
-        columns = max(1, (available + self.grid.spacing()) // (280 + self.grid.spacing()))
-        for index, card in enumerate(self.cards.values()):
-            self.grid.addWidget(card, index // columns, index % columns, Qt.AlignmentFlag.AlignHCenter)
+        if hasattr(self, 'sort'):
+            self.settings.settings.setValue('campaign_sort', self.sort.currentData())
+        for section in TAB_SECTIONS:
+            if section['name'] not in self.tab_grids:
+                continue
+            grid = self.tab_grids[section['name']]
+            ordered = sort_campaigns([card.campaign for card in self.cards.values()],
+                                     self.sort.currentData() if hasattr(self, 'sort') else 'name')
+            query = self.search.text().strip().casefold() if hasattr(self, 'search') else ''
+            section_cards = [self.cards[c['slug']] for c in ordered if section['shows'](c)]
+            members = [card for card in section_cards if not query or query in
+                       (card.campaign['name'] + ' ' + card.campaign.get('author', '')).casefold()]
+            for card in section_cards:
+                card.hide()
+            while grid.count():
+                grid.takeAt(0)
+            empty = self.empty_labels[section['name']]
+            empty.hide()
+            if not members:
+                empty.setText('No matching campaigns.\nTry another name or clear the search.' if query else
+                              'No campaigns available here yet.\nChoose Refresh to check again, or import a ZIP in My campaigns.')
+                grid.addWidget(empty, 0, 0)
+                empty.show()
+            margins = grid.contentsMargins()
+            viewport = self.tab_viewports[section['name']]
+            available = viewport.width() - margins.left() - margins.right()
+            spacing = grid.spacing()
+            columns = max(1, (available + spacing) // (280 + spacing))
+            for index, card in enumerate(members):
+                grid.addWidget(card, index // columns, index % columns, Qt.AlignmentFlag.AlignHCenter)
+                card.show()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, 'scroll'):
+        if hasattr(self, 'tabs'):
             self._layout_cards()
+        if hasattr(self, 'catalog_toolbar'):
+            self.catalog_toolbar.setDirection(QBoxLayout.Direction.TopToBottom if self.width() < 600
+                                              else QBoxLayout.Direction.LeftToRight)
 
     def eventFilter(self, watched, event):
-        if watched is self.scroll.viewport() and event.type() == QEvent.Type.Resize:
+        if event.type() == QEvent.Type.Resize and watched in self.tab_viewports.values():
             self._layout_cards()
         return super().eventFilter(watched, event)
 
     def _request(self, slug, action):
-        if self.closing:
+        if self.closing or (self.ccm_page is not None and self.ccm_page.job):
             return
         campaign = self.cards[slug].campaign
         if action == 'cancel':
             if slug == self.mutation_slug:
                 self.mutation.cancel.set()
                 self.cards[slug].status.setText('Cancelling...')
+                self.cards[slug].play.setEnabled(False)
             else:
                 self.queue = [(c, a) for c, a in self.queue if c['slug'] != slug]
                 self.cards[slug].set_idle()
@@ -655,7 +841,17 @@ class MainWindow(QMainWindow):
                 self._set_notice('Wait for file operations to finish before playing.')
                 return
             try:
-                path = self.library.destination(campaign, campaign['maps'][0])
+                if self.ccm_page is not None:
+                    self.ccm_page.manager.check_campaign_files(
+                        self.library.destination(campaign, f) for f in campaign['maps'] + campaign['mods'])
+                file = campaign['maps'][0]
+                if not campaign.get('has_launcher', True):
+                    names = [f['name'] for f in campaign['maps']]
+                    choice, accepted = QInputDialog.getItem(self, campaign['name'], 'Choose a mission:', names, 0, False)
+                    if not accepted:
+                        return
+                    file = campaign['maps'][names.index(choice)]
+                path = self.library.destination(campaign, file)
                 self.launcher.launch(slug, self.settings.launch_options(), path)
             except (OSError, ValueError) as error:
                 self._launch_failed(slug, str(error))
@@ -695,6 +891,9 @@ class MainWindow(QMainWindow):
         library, catalog = self.library, list(self.campaigns)
 
         def mutate(cancel, notify):
+            if self.ccm_page is not None:
+                self.ccm_page.manager.check_campaign_files(
+                    library.destination(campaign, f) for f in campaign['maps'] + campaign['mods'])
             if action == 'install':
                 return library.install(campaign, cancel, notify)
             return library.remove(campaign, catalog, cancel)
@@ -730,22 +929,52 @@ class MainWindow(QMainWindow):
 
     def _update_controls(self):
         changing = bool(self.mutation or self.queue)
+        if self.ccm_page is not None:
+            self.ccm_page.external_busy = changing or self.closing
+            self.ccm_page.update_controls()
+            changing = changing or bool(self.ccm_page.job)
         running = bool(self.launcher.processes)
+        self.recover_launch_btn.setVisible(running and self.settings.backend.name == 'linux')
+        self.recover_launch_btn.setEnabled(not changing and not self.closing)
         self.settings_btn.setEnabled(not changing and not running and not self.closing)
+        self.refresh_btn.setEnabled(not changing and not self.closing)
         queued = {c['slug'] for c, _ in self.queue}
         for slug, card in self.cards.items():
             if slug == self.mutation_slug or slug in queued:
                 continue
+            if self.ccm_page is not None and self.ccm_page.job:
+                card.play.setEnabled(False)
+                card.remove.setEnabled(False)
+                continue
             can_queue = card.campaign.get('status') != 'installed'
             card.play.setEnabled(not running and (not changing or can_queue) and not self.closing)
             card.remove.setEnabled(card.campaign.get('removable', False) and not running and not self.closing)
+
+    def _recover_launch(self):
+        if self.closing or self.mutation or self.queue or (self.ccm_page is not None and self.ccm_page.job):
+            return
+        if QMessageBox.question(self, 'Recover launch controls',
+                                'Use this if a failed Linux launch has left the controls disabled.\n\n'
+                                'Close any stalled Wine or Proton launch first. Recovery stops tracking '
+                                'the launch; it does not terminate Wine, Proton, or StarCraft II. '
+                                'It will refuse if StarCraft II is detected.\n\nRecover the controls now?') \
+                != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.launcher.release_failed_launches()
+        except (OSError, ValueError) as error:
+            self._set_notice(str(error))
+            return
+        self._update_controls()
+        self._set_notice('Launch controls recovered. Campaign files and launch logs were kept. '
+                         'Close any leftover Wine or Proton launch before trying Play again.')
 
     def _set_notice(self, text):
         self.notice.setText(text)
         self.notice.setVisible(bool(text))
 
     def _launch_failed(self, slug, message):
-        if show_details(self, 'Launch failed', message, repair=True) and slug in self.cards:
+        if show_details(self, 'Launch failed', message, repair=slug in self.cards) and slug in self.cards:
             self._request(slug, 'install')
 
     def _open_settings(self):
@@ -754,6 +983,10 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.generation += 1
             self.library = Library(self.settings.sc2_root(), self.settings.backend.data_dir())
+            if self.ccm_page is not None:
+                from .ccm import CampaignManager
+                self.ccm_page.manager = CampaignManager(self.settings.sc2_root(), self.settings.backend.data_dir())
+                self.ccm_page.reload()
             self.campaigns = []
             for card in self.cards.values():
                 card.deleteLater()
@@ -793,14 +1026,50 @@ def apply_palette(app):
     for role in (QPalette.ColorRole.Text, QPalette.ColorRole.ButtonText, QPalette.ColorRole.WindowText):
         palette.setColor(QPalette.ColorGroup.Disabled, role, QColor('#888888'))
     app.setPalette(palette)
+    font = app.font()
+    if font.pointSizeF() < 10:
+        font.setPointSize(10)
+        app.setFont(font)
+    app.setStyleSheet('''
+        QPushButton, QToolButton { min-height: 24px; padding: 4px 10px;
+            border: 1px solid #666; border-radius: 4px; background: #383838; color: #f2f2f2; }
+        QPushButton:hover, QToolButton:hover { background: #484848; }
+        QPushButton:focus, QToolButton:focus, QLineEdit:focus, QComboBox:focus {
+            border: 2px solid #b8d5ff; }
+        QPushButton:disabled, QToolButton:disabled { color: #aaa; border-color: #444; background: #303030; }
+        QPushButton[primary="true"] { background: #245b94; color: white; font-weight: bold; }
+        QPushButton[primary="true"]:hover { background: #2e6aab; }
+        QPushButton[primary="true"]:disabled { color: #aaa; background: #303030; }
+        QLineEdit, QComboBox { min-height: 24px; padding: 4px; border: 1px solid #666; border-radius: 3px; }
+        QTabWidget::pane { border: 1px solid #555; }
+        QTabBar::tab { padding: 8px 12px; background: #303030; color: #ddd;
+            border: 1px solid #555; border-bottom: 0; }
+        QTabBar::tab:selected { background: #252525; border-bottom: 2px solid #b8d5ff; }
+        QTabBar QToolButton { padding: 0; min-width: 16px; }
+        QLabel#hint { color: #c4c4c4; }
+        QLabel#emptyState { color: #d4d4d4; padding: 24px; }
+        QProgressBar { background: #303030; border: 1px solid #666; border-radius: 3px; }
+        QProgressBar::chunk { background: #8ab8ed; }
+    ''')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--ccm-only', action='store_true', help='Show only the Custom Campaign Manager.')
     parser.add_argument('--version', action='version', version=__version__)
+    parser.add_argument('--build-info', nargs='?', const='-', metavar='FILE',
+                        help='Print build provenance or write it to FILE, then exit.')
     parser.add_argument('--smoke-test', action='store_true', help='Check the packaged UI and assets, then exit.')
     parser.add_argument('--run-game', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.build_info:
+        from .release_info import packaged_build_info
+        details = json.dumps(packaged_build_info(), indent=2, sort_keys=True) + '\n'
+        if args.build_info == '-':
+            print(details, end='')
+        else:
+            Path(args.build_info).write_text(details, encoding='utf-8')
+        return
     if args.run_game:
         from .game_process import run
         raise SystemExit(run(args.run_game))
@@ -843,7 +1112,7 @@ def main():
                 jobs.idle.connect(loop.quit)
                 loop.exec()
             return
-    window = MainWindow(settings, jobs)
+    window = MainWindow(settings, jobs, ccm_only=args.ccm_only or Path(sys.executable).stem == 'SC2CampaignManager')
     window.show()
     app.exec()
     lock.unlock()

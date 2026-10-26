@@ -8,6 +8,7 @@ from threading import Event, RLock
 from .catalog import file_key, parse_campaign, raw_campaign
 from .files import atomic_json, check_cancel, contained_path, file_hash, prune_empty, read_json, signature
 from .network import HttpClient
+from .game_state import game_running
 
 
 def is_sc2_root(path: Path) -> bool:
@@ -57,6 +58,9 @@ class Library:
             raise ValueError(f'StarCraft II was not found at {self.root}. Check Settings.')
         if self.problem:
             raise ValueError(self.problem)
+
+        if game_running():
+            raise ValueError('Close StarCraft II before installing or removing campaign files.')
 
     def destination(self, campaign: dict, file: dict) -> Path:
         return contained_path(self.root, file_key(campaign, file))

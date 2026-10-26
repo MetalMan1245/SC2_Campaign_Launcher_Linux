@@ -16,10 +16,26 @@ from . import __version__
 from .files import Cancelled, check_cancel
 
 ALLOWED_HOSTS = frozenset({
+    'api.github.com',
     'github.com', 'raw.githubusercontent.com', 'objects.githubusercontent.com',
-    'release-assets.githubusercontent.com', 'media.githubusercontent.com',
+    'release-assets.githubusercontent.com', 'media.githubusercontent.com', 'sc2.sarl',
 })
 CHUNK_SIZE = 256 * 1024
+DEFAULT_DOWNLOAD_LIMIT = 16 * 1024**3
+DEFAULT_FREE_RESERVE = 256 * 1024**2
+
+
+def resource_setting(value, variable, default, minimum):
+    value = os.environ.get(variable, str(default)) if value is None else value
+    try:
+        if type(value) not in (str, int):
+            raise ValueError
+        result = int(value)
+        if result < minimum:
+            raise ValueError
+        return result
+    except ValueError as error:
+        raise ValueError(f'{variable} must be an integer number of bytes, at least {minimum}.') from error
 
 
 def validate_url(url: str) -> str:
@@ -40,8 +56,10 @@ class CheckedRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class HttpClient:
-    def __init__(self, opener=None):
+    def __init__(self, opener=None, *, download_limit=None, free_reserve=None):
         self.opener = opener or urllib.request.build_opener(CheckedRedirect())
+        self.download_limit = download_limit
+        self.free_reserve = free_reserve
 
     def open(self, url: str, cancel: Event | None = None):
         validate_url(url)
@@ -100,6 +118,14 @@ class HttpClient:
     def download(self, url: str, destination: Path, expected_sha: str,
                  cancel: Event, progress, check_destination=lambda: None):
         check_cancel(cancel)
+        limit = resource_setting(self.download_limit, 'SC2CL_MAX_DOWNLOAD_BYTES', DEFAULT_DOWNLOAD_LIMIT, 1)
+        reserve = resource_setting(self.free_reserve, 'SC2CL_MIN_FREE_BYTES', DEFAULT_FREE_RESERVE, 0)
+
+        def check_space(required):
+            if shutil.disk_usage(destination.parent).free < required + reserve:
+                raise OSError(f'Not enough free space for {destination.name}, including the {reserve}-byte reserve. '
+                              'Free space or adjust SC2CL_MIN_FREE_BYTES.')
+
         check_destination()
         destination.parent.mkdir(parents=True, exist_ok=True)
         check_destination()
@@ -108,21 +134,32 @@ class HttpClient:
         try:
             with os.fdopen(fd, 'wb') as output, self.open(url, cancel) as response:
                 length_header = response.headers.get('Content-Length')
-                length = int(length_header) if length_header else 0
-                if length < 0:
-                    raise ValueError('Invalid Content-Length.')
-                if length and shutil.disk_usage(destination.parent).free < length:
-                    raise OSError(f'Not enough free space for {destination.name}.')
+                length = None
+                if length_header is not None:
+                    header = length_header.strip()
+                    if not header or not header.isascii() or not header.isdecimal():
+                        raise ValueError('Invalid Content-Length.')
+                    length = int(header)
+                    if length > limit:
+                        raise ValueError('The download exceeds SC2CL_MAX_DOWNLOAD_BYTES. '
+                                         'For a verified larger campaign, raise this byte limit and retry.')
+                check_space(length or 0)
                 digest, received = hashlib.sha256(), 0
-                progress(0, length)
-                while chunk := self._read(response, CHUNK_SIZE):
+                progress(0, length or 0)
+                while chunk := self._read(response, min(CHUNK_SIZE, limit - received + 1)):
                     check_cancel(cancel)
+                    if received + len(chunk) > limit:
+                        raise ValueError('The download exceeds SC2CL_MAX_DOWNLOAD_BYTES. '
+                                         'For a verified larger campaign, raise this byte limit and retry.')
+                    if length is not None and received + len(chunk) > length:
+                        raise OSError(f'The download exceeds its declared size: {destination.name}')
+                    check_space(len(chunk))
                     output.write(chunk)
                     digest.update(chunk)
                     received += len(chunk)
-                    progress(received, length)
+                    progress(received, length or 0)
                 check_cancel(cancel)
-                if length and length != received:
+                if length is not None and length != received:
                     raise OSError(f'Incomplete download: {destination.name}')
                 if digest.hexdigest() != expected_sha:
                     raise ValueError(f'Checksum mismatch: {destination.name}. Refresh and try again.')

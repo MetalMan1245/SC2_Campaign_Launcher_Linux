@@ -175,14 +175,13 @@ class LinuxBackend:
             roots.extend((library / 'steamapps/common', library / 'steamapps/compatdata'))
         return list(dict.fromkeys(roots))
 
-    def command(self, options: LaunchOptions, map_path: Path) -> tuple[list[str], dict]:
+    def command(self, options: LaunchOptions, map_path: Path | None) -> tuple[list[str], dict]:
         root = validate_root(str(options.root))
         prefix = validate_prefix(options.prefix)
         env = dict(os.environ)
         env['WINEPREFIX'] = str(prefix)
         switcher = str(root / 'Support64/SC2Switcher_x64.exe')
-        switcher = str(root / 'Support64/SC2Switcher_x64.exe')
-        map_arg = linux_map_path(map_path)
+        arguments = ['-run', linux_map_path(map_path)] if map_path is not None else []
         if options.runner == MANAGED_PROTON:
             runner = None
         else:
@@ -192,7 +191,7 @@ class LinuxBackend:
         if runner and runner[0] == 'wine':
             for name in ('PROTONPATH', 'PROTON_VERB', 'STEAM_COMPAT_DATA_PATH'):
                 env.pop(name, None)
-            return [str(runner[1]), switcher, '-run', map_arg], env
+            return [str(runner[1]), switcher, *arguments], env
         umu = options.umu or shutil.which('umu-run')
         if not umu:
             raise ValueError('umu-run was not found. Install UMU or set its executable in Settings.')
@@ -201,12 +200,34 @@ class LinuxBackend:
             raise ValueError(f'UMU is not executable: {umu_path}')
         if runner:
             env['PROTONPATH'] = str(runner[1].resolve())
-            env.update(PROTON_VERB='run', GAMEID='umu-default',
-           STEAM_COMPAT_INSTALL_PATH=str(root))
+            env['STEAM_COMPAT_INSTALL_PATH'] = str(root)
         else:
             env.pop('PROTONPATH', None)
         env.update(PROTON_VERB='run', GAMEID='umu-default')
-        return [str(umu_path), switcher, '-run', map_arg], env
+        return [str(umu_path), switcher, *arguments], env
+
+
+def battlenet_registration():
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, r'battlenet\shell\open\command') as key:
+            return winreg.QueryValueEx(key, '')[0]
+    except (ImportError, OSError):
+        return ''
+
+
+def battlenet_executable():
+    registration = battlenet_registration().strip()
+    match = re.match(r'^"([^"]+\.exe)"(?:\s|$)|^(.+?\.exe)(?:\s|$)', registration, re.IGNORECASE)
+    candidates = [Path(match.group(1) or match.group(2))] if match else []
+    for variable in ('PROGRAMFILES(X86)', 'PROGRAMFILES'):
+        if value := os.environ.get(variable):
+            candidates.append(Path(value) / 'Battle.net/Battle.net.exe')
+    for path in candidates:
+        if path.is_absolute() and path.name.casefold() == 'battle.net.exe' and path.is_file():
+            return path
+    raise ValueError('Battle.net was not found. Open Battle.net once, then try Play again. '
+                     'You can also use Load and start StarCraft II from Battle.net yourself.')
 
 
 class WindowsBackend:
@@ -226,9 +247,12 @@ class WindowsBackend:
                  Path(os.environ.get('PROGRAMFILES', r'C:\Program Files'))]
         return [path / 'StarCraft II' for path in roots]
 
-    def command(self, options: LaunchOptions, map_path: Path) -> tuple[list[str], dict]:
+    def command(self, options: LaunchOptions, map_path: Path | None) -> tuple[list[str], dict]:
         root = validate_root(str(options.root))
-        return [str(root / 'Support64/SC2Switcher_x64.exe'), '-run', str(map_path.resolve())], dict(os.environ)
+        if map_path is None:
+            return [str(battlenet_executable()), '--exec=launch S2'], dict(os.environ)
+        arguments = ['-run', str(map_path.resolve())] if map_path is not None else []
+        return [str(root / 'Support64/SC2Switcher_x64.exe'), *arguments], dict(os.environ)
 
 
 def get_backend():

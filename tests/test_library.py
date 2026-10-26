@@ -47,6 +47,30 @@ def use_downloads(library, data=None):
     return opener
 
 
+@pytest.mark.parametrize('action', ['install', 'remove'])
+@pytest.mark.parametrize('unavailable', [False, True])
+def test_external_game_blocks_catalog_mutations(library, monkeypatch, action, unavailable):
+    c = campaign()
+    use_downloads(library)
+    library.install(c, Event())
+    before = {p: p.read_bytes() for p in library.root.rglob('*') if p.is_file()}
+    record = library.state_path.read_bytes()
+    def running():
+        if unavailable:
+            raise OSError('Could not check whether StarCraft II is running.')
+        return True
+
+    monkeypatch.setattr('sc2_campaign_launcher_linux.library.game_running', running)
+    error, message = (OSError, 'Could not check') if unavailable else (ValueError, 'Close StarCraft II')
+    with pytest.raises(error, match=message):
+        if action == 'install':
+            library.install(c, Event())
+        else:
+            library.remove(c, [c], Event())
+    assert {p: p.read_bytes() for p in library.root.rglob('*') if p.is_file()} == before
+    assert library.state_path.read_bytes() == record
+
+
 def test_map_only_update_and_corruption_are_detected(library):
     c = campaign(mods=[])
     path = write(library.destination(c, c['maps'][0]), b'old map')

@@ -1,11 +1,26 @@
 # SC2 Campaign Launcher
 
+The `feature/ccm-manager` branch adds local CCM packages, bank-reference scanning,
+and a Windows Custom Campaign Manager build. See [CCM usage](docs/ccm.md) for import,
+activation, base-map extraction, recovery, and current limitations.
+Imports include a bank-reference scan. Each campaign's More menu opens the
+results and an account-specific local bank list. These lists are for review;
+they do not enable automatic bank switching.
+Older imports without a scan report are scanned automatically when the campaign
+library opens. Existing reports and reviewed local lists are kept.
+Packed map scanning uses mpyq, included in Windows bundles and installed by pip
+with the project. Older system-Python installations can still open the launcher
+without it, but must install the project dependencies to scan packed maps.
+
+
 <img src="img/Screenshot_20260904_224948.png" />
 
 Download and play the custom campaigns published in
 [R-P-S/SC2Campaigns](https://github.com/R-P-S/SC2Campaigns).
 The launcher runs on Linux with Wine or Proton, and on Windows.
 StarCraft II must already be installed.
+This branch does not support macOS yet. See the [macOS assessment](docs/macos.md)
+for the required platform work and testing.
 
 ## Linux installation
 
@@ -13,15 +28,24 @@ Requirements:
 
 - Python 3.10 or newer
 - PyQt6 6.2.3 or newer
+- mpyq 0.2.5 for packed map and mod scanning
 - [UMU](https://github.com/Open-Wine-Components/umu-launcher#installing) for Proton,
   or a working Wine installation
 - An existing Wine prefix with StarCraft II installed
 
-From a complete source checkout, run:
+Clone this branch and install its dependencies in a virtual environment:
 
 ```sh
-bash install-uninstall-SC2CLL.sh
+git clone --branch feature/ccm-manager https://github.com/RogerRoger29/SC2_Campaign_Launcher_Linux.git
+cd SC2_Campaign_Launcher_Linux
+python3 -m venv .venv
+.venv/bin/python -m pip install .
+SC2CL_PYTHON="$PWD/.venv/bin/python" bash install-uninstall-SC2CLL.sh
 ```
+
+Keep the checkout and its `.venv` directory after installation. The menu entry
+uses that Python environment. On distributions that package venv separately,
+install the Python venv package before running these commands.
 
 The installer detects existing local and custom installations and offers the
 corresponding update and removal actions. On a new installation it asks where
@@ -34,23 +58,22 @@ To select a local installation directly, use `--install local`.
 For a custom installation, choose a parent directory:
 
 ```sh
-bash install-uninstall-SC2CLL.sh --install custom --directory "$HOME/Applications"
+SC2CL_PYTHON="$PWD/.venv/bin/python" bash install-uninstall-SC2CLL.sh --install custom --directory "$HOME/Applications"
 ```
 
 This creates `$HOME/Applications/SC2CampaignLauncher`. The application directory
 must be empty on the first installation. Paths containing spaces are supported.
 Local and custom installations have separate records and menu entries.
 
-Release installers download a specific release tag. The desktop installer in
-this checkout targets `v1.2.0` and becomes usable after that tag is published.
-Until then, use the source installation above. For a specific reviewed commit:
+The remote installer, desktop bootstrap, and Settings update check use
+`RogerRoger29/SC2_Campaign_Launcher_Linux`, following `feature/ccm-manager`.
+They do not require a GitHub login. The remote installer needs curl, unzip,
+Python 3, and an existing Python environment with the dependencies above.
+Set `SC2CL_PYTHON` to that environment's Python. Set `SC2CL_REF` to select
+another branch, tag, or commit when running the remote installer.
 
-```sh
-SC2CL_REF=<full-commit-id> bash synergy_remote-installer.sh --install local
-```
-
-The remote installer requires curl and unzip. A release installer continues to
-install its named version; download a newer installer when updating.
+See the [Linux smoke test](docs/linux-smoke-test.md) for checks against a real
+Wine or Proton installation. Automated Linux checks do not cover live gameplay.
 
 ## Run from source
 
@@ -92,7 +115,7 @@ not used on Windows.
 
 ## Setup and campaign files
 
-Select the directory containing `Support64/SC2Switcher_x64.exe`. The Scan button
+Select the directory containing `Support64/SC2Switcher_x64.exe`. The Find game button
 checks common Steam, Wine, UMU, and Bottles locations. Browse can select an
 installation elsewhere.
 
@@ -113,6 +136,24 @@ After a failed launch, **Verify / repair** checks and downloads any missing or
 changed files for that campaign. Downloads are queued, can be cancelled, and are verified
 before replacing existing files. A cancelled installation keeps completed files
 so it can be resumed.
+
+Catalog downloads stop at **16 GiB per map or mod** and keep a **256 MiB free-space
+reserve**. The streamed-byte limit also applies when a server omits its size.
+Failures and cancellation preserve the previous destination and remove the
+unfinished download. Completed files remain available for resuming an install.
+These defaults leave headroom for the observed 6.27 GB local SC2Mod asset.
+
+For a verified larger file, set `SC2CL_MAX_DOWNLOAD_BYTES` to a positive integer
+byte count before starting the launcher. `SC2CL_MIN_FREE_BYTES` sets the free-space
+reserve (a nonnegative integer; zero disables that reserve). For example:
+
+```sh
+SC2CL_MAX_DOWNLOAD_BYTES=34359738368 python -m sc2_campaign_launcher_linux
+```
+
+An invalid setting stops downloads with its name in the error. Free space is
+checked before and during copying. These settings govern individual catalog
+downloads; local CCM imports retain their documented package limits.
 
 Maps go under `Maps/<campaign folder>` and shared mods go under `Mods` in the
 selected SC2 installation. Symlinks inside these managed paths are rejected.
@@ -198,7 +239,7 @@ On Linux, also run:
 ```sh
 bash -n install-uninstall-SC2CLL.sh synergy_remote-installer.sh
 shellcheck install-uninstall-SC2CLL.sh synergy_remote-installer.sh
-desktop-file-validate SC2-Campaign-Launcher-Linux_Install-Uninstall.desktop
+desktop-file-validate SC2CampaignLauncher-Linux-x86_64.desktop
 ```
 
 Build the Windows release on Windows:
@@ -212,15 +253,41 @@ The build checks Qt and artwork, then writes the complete distribution to
 `dist/SC2CampaignLauncher-Windows-x86_64.zip`. Publish that ZIP, not the executable
 alone. CI also produces the ZIP as a build artifact without publishing a release.
 
-When changing the release version, update `pyproject.toml`, the package version,
-and `RELEASE_REF` in `synergy_remote-installer.sh`, then run
-`python tools/write_installer_entry.py` to update the desktop installer.
+Each ZIP has a matching `.zip.sha256` checksum. Its bundled `build-info.json`
+records the base commit, whether the checkout had local changes, a SHA-256
+manifest of build inputs, creation time, Python/platform, and dependency versions.
+It contains relative source paths, without account or machine paths. Print it with
+`--build-info` (the same option works on a source checkout). For a Windows GUI
+bundle, use `SC2CampaignLauncher.exe --build-info report.json` to write the record
+to a file, since that executable has no console. Legacy Linux installer
+records explicitly report unknown source integrity rather than inventing a hash.
+
+Ordinary local builds may contain uncommitted work and record `dirty: true`.
+For a release candidate, first commit reviewed changes, then use:
+
+```powershell
+python tools/build_release.py --require-clean
+```
+
+CI requires clean provenance for both Windows editions. A source archive without
+Git records its commit and dirty state as unknown and cannot pass this guard.
+Changes to source inputs during a build stop packaging. ZIP creation and validation
+finish before replacing an existing ZIP, so interrupted packaging keeps the old
+archive. `--skip-build` preserves the identity inside an existing bundle and refuses
+legacy bundles without the new provenance; rebuild those first. Checksums detect
+file damage; they are not publisher signatures.
+
+Use [the Linux smoke-test checklist](docs/linux-smoke-test.md) to verify gameplay
+on the target machine. The automated suite also runs under WSL; it does not launch
+StarCraft II.
+
+When changing the release version, update `pyproject.toml` and the package version.
+Run `python tools/write_installer_entry.py` after changing the desktop bootstrap.
 
 ## Planned work
 
 - Additional campaign sources beyond the current catalog
 - Moving installed campaigns between SC2 directories
-- Sorting by author, update date, or map count, and displaying update dates
 - Exploring SC2 installation through [Naturalize](https://github.com/MetalMan1245/naturalize)
 
 ## Credits and license

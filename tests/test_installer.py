@@ -234,11 +234,43 @@ def test_interactive_install_offers_dependencies_after_location_selection(instal
     monkeypatch.setattr(module.sys, 'argv', ['installer.py', '--source', str(source)])
     monkeypatch.setattr('builtins.input', lambda _: next(answers))
     monkeypatch.setattr(module, 'qt_available', lambda: next(available))
+    monkeypatch.setattr(module, 'mpyq_available', lambda: True)
     monkeypatch.setattr(module, 'dependency_command', lambda: ['sudo', 'apt-get', 'install', 'python3-pyqt6'])
     monkeypatch.setattr(module.subprocess, 'run', lambda command, **kwargs: commands.append(command))
     module.main()
     assert commands == [['sudo', 'apt-get', 'install', 'python3-pyqt6']]
     assert 'local' in installer.installations()
+
+
+def test_install_requires_bank_reader_before_copying_files(monkeypatch):
+    import sc2_campaign_launcher_linux.installer as module
+    monkeypatch.setattr(module, 'qt_available', lambda: True)
+    monkeypatch.setattr(module, 'mpyq_available', lambda: False)
+    with pytest.raises(ValueError, match='mpyq package is required'):
+        module.ensure_dependencies()
+
+
+def test_installer_accepts_complete_python_environment(monkeypatch):
+    import sc2_campaign_launcher_linux.installer as module
+    monkeypatch.setattr(module, 'qt_available', lambda: True)
+    monkeypatch.setattr(module, 'mpyq_available', lambda: True)
+    module.ensure_dependencies()
+
+
+@pytest.mark.parametrize('distro', ['fedora', 'nobara'])
+def test_fedora_family_offers_the_pyqt6_package(monkeypatch, distro):
+    import sc2_campaign_launcher_linux.installer as module
+    original_read = Path.read_text
+
+    def read_release(path, *args, **kwargs):
+        if str(path) == '/etc/os-release' or path.as_posix() == '/etc/os-release':
+            return f'ID={distro}\n'
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', read_release)
+    monkeypatch.setattr(module.sys, 'prefix', module.sys.base_prefix)
+    monkeypatch.setattr(module.shutil, 'which', lambda command: f'/usr/bin/{command}')
+    assert module.dependency_command() == ['sudo', 'dnf', 'install', 'python3-pyqt6']
 
 
 def test_default_menu_reuses_the_existing_custom_directory(installation, tmp_path, monkeypatch, capsys):

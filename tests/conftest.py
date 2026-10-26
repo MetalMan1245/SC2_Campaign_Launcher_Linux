@@ -10,6 +10,12 @@ from sc2_campaign_launcher_linux.catalog import parse_campaign
 from sc2_campaign_launcher_linux.library import Library
 
 
+@pytest.fixture(autouse=True)
+def catalog_game_state(monkeypatch):
+    # File-operation tests must not depend on real SC2 processes or tasklist access.
+    monkeypatch.setattr('sc2_campaign_launcher_linux.library.game_running', lambda: False)
+
+
 @pytest.fixture
 def sc2_root(tmp_path):
     root = tmp_path / 'prefix/drive_c/Program Files (x86)/StarCraft II'

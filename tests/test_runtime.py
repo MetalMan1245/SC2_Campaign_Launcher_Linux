@@ -53,6 +53,7 @@ class FakeCatalog:
 @pytest.fixture
 def settings(tmp_path, sc2_root, monkeypatch):
     monkeypatch.setenv('SC2CL_PLATFORM', 'win32')
+    monkeypatch.setattr('sc2_campaign_launcher_linux.launching.game_running', lambda: False)
     value = AppSettings(QSettings(str(tmp_path / 'settings.ini'), QSettings.Format.IniFormat))
     value.settings.setValue('sc2_root', str(sc2_root))
     monkeypatch.setattr(value.backend, 'data_dir', lambda: tmp_path / 'state')
@@ -65,7 +66,7 @@ def windows(qapp, settings):
     made = []
 
     def make(**kwargs):
-        window = ui.MainWindow(settings, catalog=kwargs.pop('catalog', FakeCatalog()), **kwargs)
+        window = ui.MainWindow(settings, catalog=kwargs.pop('catalog', FakeCatalog()), include_ccm=False, **kwargs)
         made.append(window)
         return window
 
@@ -203,7 +204,7 @@ def test_plain_wine_uses_wine_and_umu_is_resolved_on_path(sc2_root, tmp_path, mo
     options = LaunchOptions(sc2_root, str(wine), str(prefix))
     command, env = backend.command(options, map_path)
     assert command[0] == str(wine)
-    assert command[-1].startswith('C:\\')
+    assert command[-1] == 'Z:' + map_path.resolve().as_posix()
     assert 'PROTONPATH' not in env
     monkeypatch.setattr('sc2_campaign_launcher_linux.platform_backend.shutil.which', lambda _: str(umu))
     command, env = backend.command(LaunchOptions(sc2_root, MANAGED_PROTON, str(prefix)), map_path)
@@ -234,13 +235,14 @@ def test_packaged_libraries_are_not_passed_to_the_game(tmp_path, monkeypatch):
 def test_card_columns_follow_the_actual_viewport(qapp, windows):
     window = windows(autoload=False)
     window._render([campaign(str(number)) for number in range(8)], window.generation)
+    window.tabs.setCurrentIndex(1)
     window.resize(400, 800)
     window.show()
     spin(qapp, lambda: not window.jobs.busy())
-    assert window.grid.getItemPosition(1)[:2] == (1, 0)
+    assert window.tab_grids['Synergy'].getItemPosition(1)[:2] == (1, 0)
     window.resize(1240, 800)
-    spin(qapp, lambda: window.grid.getItemPosition(3)[:2] == (0, 3))
-    assert window.scroll.horizontalScrollBar().maximum() == 0
+    spin(qapp, lambda: window.tab_grids['Synergy'].getItemPosition(3)[:2] == (0, 3))
+    assert window.catalog_scrolls['Synergy'].horizontalScrollBar().maximum() == 0
 
 
 def test_mutations_are_serial_and_queued_work_can_be_cancelled(qapp, windows, monkeypatch):
@@ -286,7 +288,7 @@ def test_original_card_controls_and_summary_tooltip(qapp, windows):
     assert 'Private patch notes' not in card.info.toolTip()
     buttons = [button.text() for button in card.findChildren(ui.QPushButton) if button.text()]
     assert buttons == ['Play']
-    assert not hasattr(window, 'refresh_btn') and not hasattr(window, 'verify_btn')
+    assert window.refresh_btn.parent() is window.catalog_tools and not hasattr(window, 'verify_btn')
 
 
 def test_settings_contains_refresh_and_verification(qapp, settings):
@@ -351,7 +353,7 @@ def test_saved_symlink_path_keeps_its_detected_prefix(qapp, settings, tmp_path, 
         wine.chmod(0o755)
         map_path = write(root / 'Maps/Test/Launcher.SC2Map', b'current map')
         command, env = settings.backend.command(LaunchOptions(alias, str(wine), str(prefix)), map_path)
-        assert command[-1] == 'C:\\StarCraft II\\Maps\\Test\\Launcher.SC2Map'
+        assert command[-1] == 'Z:' + map_path.resolve().as_posix()
         assert env['WINEPREFIX'] == str(prefix)
 
 
@@ -369,6 +371,8 @@ def test_game_logs_and_file_protection_survive_launcher_exit(qapp, windows, sett
     parent = ('import os, sys\nfrom pathlib import Path\n'
               'from PyQt6.QtCore import QCoreApplication\n'
               'from sc2_campaign_launcher_linux.launching import LaunchManager\n'
+              'import sc2_campaign_launcher_linux.launching as launching\n'
+              'launching.game_running = lambda: False\n'
               'from sc2_campaign_launcher_linux.platform_backend import LaunchOptions\n'
               'class Backend:\n'
               f'    def command(self, options, path): return [sys.executable, "-c", {child!r}], dict(os.environ)\n'

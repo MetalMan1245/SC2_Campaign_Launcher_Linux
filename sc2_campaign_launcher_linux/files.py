@@ -45,7 +45,8 @@ def contained_path(root: Path, *names: str) -> Path:
     current = root
     for part in path.relative_to(root).parts:
         current /= part
-        if current.is_symlink():
+        if current.is_symlink() or (current.exists() and
+                                   getattr(current.lstat(), 'st_file_attributes', 0) & 0x400):
             raise ValueError(f'Symbolic links cannot be modified: {current}')
     return path
 

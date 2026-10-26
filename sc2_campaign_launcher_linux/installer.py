@@ -140,7 +140,7 @@ class Installer:
         for file in sorted(assets.iterdir()):
             if file.is_file() and file.suffix.lower() in ('.png', '.ico'):
                 payload[f'assets/{file.name}'] = file.read_bytes()
-        for name in ('LICENSE', 'README.md'):
+        for name in ('LICENSE', 'README.md', 'build-info.json'):
             if (source / name).is_file():
                 payload[name] = (source / name).read_bytes()
         if target.exists() and not original['files']:
@@ -376,17 +376,27 @@ def dependency_command():
 
 
 def ensure_dependencies():
-    if qt_available():
-        return
-    command = dependency_command()
-    if command:
-        answer = input(f'Install {command[-1]} using the package manager? [y/N]: ').strip().lower()
-        if answer == 'y':
-            subprocess.run(command, check=True)
+    if not qt_available():
+        command = dependency_command()
+        if command:
+            answer = input(f'Install {command[-1]} using the package manager? [y/N]: ').strip().lower()
+            if answer == 'y':
+                subprocess.run(command, check=True)
     if not qt_available():
         raise ValueError('PyQt6 6.2.3 or newer could not be loaded in the selected Python environment. '
                          'Install PyQt6 there, then run the installer again. '
                          'See the virtual environment instructions in README.md.')
+    if not mpyq_available():
+        raise ValueError('The mpyq package is required to scan campaign banks. '
+                         'Install the project with python -m pip install . in a virtual environment, '
+                         'then set SC2CL_PYTHON to that environment\'s Python when running this installer. '
+                         'See the Linux installation instructions in README.md.')
+
+
+def mpyq_available():
+    check = subprocess.run([sys.executable, '-c', 'from mpyq import MPQArchive'],
+                           capture_output=True, check=False)
+    return check.returncode == 0
 
 
 def gui_uninstall(installer, scope):

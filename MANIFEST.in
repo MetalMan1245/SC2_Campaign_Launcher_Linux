@@ -3,3 +3,4 @@ include *.sh *.desktop
 recursive-include assets *.png *.ico
 recursive-include tests *.py
 recursive-include tools *.py
+recursive-include native *.dll *.txt
